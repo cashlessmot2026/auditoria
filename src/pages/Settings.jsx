@@ -1,0 +1,132 @@
+import { useEffect, useState } from 'react';
+import { Save, Download, LogOut, History, Building2, UserCircle, Smartphone } from 'lucide-react';
+import { useData } from '../lib/data';
+import { useAuth } from '../lib/auth';
+import { supabase, logAction } from '../lib/supabase';
+import { PageHead } from '../components/Layout';
+import { Field, useToast } from '../components/ui';
+import { fmtDate, todayISO } from '../lib/utils';
+
+export default function Settings() {
+  const { settings, requirements, activities, trainings, documents, profiles, reload } = useData();
+  const { isAdmin, profile, signOut, refreshProfile } = useAuth();
+  const toast = useToast();
+  const [f, setF] = useState(settings || {});
+  const [me, setMe] = useState({ full_name: profile.full_name, phone: profile.phone || '', cargo: profile.cargo || '' });
+  const [log, setLog] = useState([]);
+  const [installEvt, setInstallEvt] = useState(null);
+
+  useEffect(() => { setF(settings || {}); }, [settings]);
+  useEffect(() => {
+    supabase.from('audit_log').select('*').order('created_at', { ascending: false }).limit(40).then(({ data }) => setLog(data || []));
+    const h = (e) => { e.preventDefault(); setInstallEvt(e); };
+    window.addEventListener('beforeinstallprompt', h);
+    return () => window.removeEventListener('beforeinstallprompt', h);
+  }, []);
+
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value === '' ? null : e.target.value });
+
+  async function saveIPS() {
+    const { id, updated_at, ...rest } = f;
+    const { error } = await supabase.from('ips_settings').upsert({ id: 1, ...rest });
+    if (error) return toast(error.message);
+    logAction('Actualizó datos de la IPS', 'settings'); toast('Datos de la IPS guardados ✔'); reload();
+  }
+  async function saveMe() {
+    const { error } = await supabase.from('profiles').update(me).eq('id', profile.id);
+    if (error) return toast(error.message);
+    toast('Perfil actualizado ✔'); refreshProfile(); reload();
+  }
+
+  // Datos para el archivo ST002 (CE 012/2016 Supersalud)
+  function st002() {
+    const year = Number(f.vigencia) || new Date().getFullYear();
+    const ruta = activities.filter((a) => a.phase);
+    const starts = ruta.map((a) => a.start_date).filter(Boolean).sort();
+    const ends = ruta.map((a) => a.end_date).filter(Boolean).sort();
+    const accProg = activities.filter((a) => a.phase === 6 || a.phase === 7).length;
+    const accEjec = activities.filter((a) => (a.phase === 6 || a.phase === 7) && a.status === 'completada').length;
+    const audProg = activities.filter((a) => /auditor/i.test(a.title)).length;
+    const audEjec = activities.filter((a) => /auditor/i.test(a.title) && a.status === 'completada').length;
+    const aprendizaje = documents.filter((d) => requirements.find((r) => r.id === d.requirement_id)?.phase === 9).length;
+    const estandar = requirements.filter((r) => r.status === 'cumplido' && ['Procesos prioritarios', 'Seguridad del paciente'].includes(r.category)).map((r) => r.title).join(';').slice(0, 4000);
+    const fields = [f.codigo_dane || '88001', starts[0] || `${year}-01-01`, ends[ends.length - 1] || `${year}-12-31`, accProg, accEjec, audProg, audEjec, aprendizaje, estandar, f.lider_calidad || '', f.email_calidad || '', f.telefono || '', f.responsable_plan || '', '', '', ''];
+    const blob = new Blob([fields.join('|')], { type: 'text/plain' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `BORRADOR_ST002_${(f.nit || 'NIT').replace(/\D/g, '')}_${year}.txt`; a.click();
+    toast('Borrador generado: valide los campos con la estructura vigente de Supersalud antes de cargar.');
+  }
+
+  function backup() {
+    const blob = new Blob([JSON.stringify({ exportado: new Date().toISOString(), settings, requirements, activities, trainings, documents, profiles }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `respaldo_pamec_${todayISO()}.json`; a.click();
+  }
+
+  const name = (id) => profiles.find((p) => p.id === id)?.full_name || '—';
+
+  return (
+    <>
+      <PageHead title="Ajustes" sub="Datos de la IPS, perfil, reportes y bitácora">
+        <button className="btn ghost" onClick={signOut}><LogOut size={16} /> Cerrar sesión</button>
+      </PageHead>
+
+      <div className="grid g-2">
+        <div className="card stack">
+          <h2 className="row"><Building2 size={20} /> Datos de la IPS</h2>
+          <div className="grid g-2">
+            <Field label="Nombre"><input className="input" value={f.nombre || ''} onChange={set('nombre')} disabled={!isAdmin} /></Field>
+            <Field label="NIT"><input className="input" value={f.nit || ''} onChange={set('nit')} disabled={!isAdmin} /></Field>
+            <Field label="Código de habilitación (REPS)"><input className="input" value={f.codigo_habilitacion || ''} onChange={set('codigo_habilitacion')} disabled={!isAdmin} /></Field>
+            <Field label="Código DANE"><input className="input" value={f.codigo_dane || ''} onChange={set('codigo_dane')} disabled={!isAdmin} /></Field>
+            <Field label="Dirección"><input className="input" value={f.direccion || ''} onChange={set('direccion')} disabled={!isAdmin} /></Field>
+            <Field label="Representante legal"><input className="input" value={f.representante_legal || ''} onChange={set('representante_legal')} disabled={!isAdmin} /></Field>
+            <Field label="Líder de calidad"><input className="input" value={f.lider_calidad || ''} onChange={set('lider_calidad')} disabled={!isAdmin} /></Field>
+            <Field label="Correo líder de calidad"><input className="input" value={f.email_calidad || ''} onChange={set('email_calidad')} disabled={!isAdmin} /></Field>
+            <Field label="Teléfono"><input className="input" value={f.telefono || ''} onChange={set('telefono')} disabled={!isAdmin} /></Field>
+            <Field label="Responsable plan de mejoramiento"><input className="input" value={f.responsable_plan || ''} onChange={set('responsable_plan')} disabled={!isAdmin} /></Field>
+            <Field label="Fecha meta auditoría Secretaría"><input type="date" className="input" value={f.fecha_meta_auditoria || ''} onChange={set('fecha_meta_auditoria')} disabled={!isAdmin} /></Field>
+            <Field label="Vigencia PAMEC (año)"><input type="number" className="input" value={f.vigencia || ''} onChange={set('vigencia')} disabled={!isAdmin} /></Field>
+          </div>
+          <Field label="Servicios habilitados"><textarea className="input" value={f.servicios || ''} onChange={set('servicios')} disabled={!isAdmin} /></Field>
+          {isAdmin && <div className="row" style={{ justifyContent: 'flex-end' }}><button className="btn" onClick={saveIPS}><Save size={16} /> Guardar</button></div>}
+        </div>
+
+        <div className="stack">
+          <div className="card stack">
+            <h2 className="row"><UserCircle size={20} /> Mi perfil</h2>
+            <div className="grid g-2">
+              <Field label="Nombre"><input className="input" value={me.full_name || ''} onChange={(e) => setMe({ ...me, full_name: e.target.value })} /></Field>
+              <Field label="Cargo"><input className="input" value={me.cargo} onChange={(e) => setMe({ ...me, cargo: e.target.value })} /></Field>
+              <Field label="Teléfono"><input className="input" value={me.phone} onChange={(e) => setMe({ ...me, phone: e.target.value })} /></Field>
+              <Field label="Correo"><input className="input" value={profile.email || ''} disabled /></Field>
+            </div>
+            {profile.funciones && <div className="ai-box small"><b>Mis funciones:</b> {profile.funciones}</div>}
+            <div className="row" style={{ justifyContent: 'flex-end' }}><button className="btn soft" onClick={saveMe}><Save size={16} /> Actualizar</button></div>
+          </div>
+
+          <div className="card stack">
+            <h2 className="row"><Download size={20} /> Reportes y app</h2>
+            <button className="btn ghost block" onClick={st002}><Download size={16} /> Borrador archivo ST002 (Supersalud)</button>
+            {isAdmin && <button className="btn ghost block" onClick={backup}><Download size={16} /> Respaldo completo (JSON)</button>}
+            {installEvt
+              ? <button className="btn block" onClick={() => { installEvt.prompt(); setInstallEvt(null); }}><Smartphone size={16} /> Instalar app en este dispositivo</button>
+              : <p className="small muted"><Smartphone size={14} /> Para instalar: en Android/Chrome usa «Instalar app»; en iPhone/Safari usa Compartir → «Agregar a pantalla de inicio».</p>}
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2 className="row" style={{ marginBottom: 10 }}><History size={20} /> Bitácora reciente (trazabilidad)</h2>
+        <div className="scroll-x">
+          <table className="table">
+            <thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Detalle</th></tr></thead>
+            <tbody>
+              {log.map((l) => <tr key={l.id}><td className="small">{fmtDate(l.created_at)} {new Date(l.created_at).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })}</td><td>{name(l.user_id)}</td><td>{l.action}</td><td className="small muted">{l.detail}</td></tr>)}
+              {!log.length && <tr><td colSpan={4} className="muted small">Sin registros.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  );
+}
