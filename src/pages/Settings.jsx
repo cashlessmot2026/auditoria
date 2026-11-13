@@ -25,11 +25,11 @@ export default function Settings() {
   }, []);
 
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value === '' ? null : e.target.value });
-  const [pw, setPw] = useState({ a: '', b: '' });
+  const [pw, setPw] = useState({ cur: '', a: '', b: '' });
   async function changePw() {
-    const { error } = await supabase.auth.updateUser({ password: pw.a });
+    const { error } = await supabase.rpc('change_my_password', { p_current: pw.cur, p_new: pw.a });
     if (error) return toast(error.message);
-    setPw({ a: '', b: '' }); logAction('Cambió su contraseña', 'profile', profile.id); toast('Contraseña actualizada ✔');
+    setPw({ cur: '', a: '', b: '' }); logAction('Cambió su contraseña', 'profile', profile.id); toast('Contraseña actualizada ✔');
   }
 
   async function saveIPS() {
@@ -110,12 +110,13 @@ export default function Settings() {
             <div className="row" style={{ justifyContent: 'flex-end' }}><button className="btn soft" onClick={saveMe}><Save size={16} /> Actualizar</button></div>
             <div className="divider" />
             <h3 className="row"><KeyRound size={18} /> Cambiar contraseña</h3>
+            <Field label="Contraseña actual"><input type="password" className="input" value={pw.cur} onChange={(e) => setPw({ ...pw, cur: e.target.value })} autoComplete="current-password" /></Field>
             <div className="grid g-2">
               <Field label="Nueva contraseña"><input type="password" className="input" value={pw.a} onChange={(e) => setPw({ ...pw, a: e.target.value })} autoComplete="new-password" /></Field>
               <Field label="Repetir contraseña"><input type="password" className="input" value={pw.b} onChange={(e) => setPw({ ...pw, b: e.target.value })} autoComplete="new-password" /></Field>
             </div>
             <div className="row" style={{ justifyContent: 'flex-end' }}>
-              <button className="btn" disabled={pw.a.length < 6 || pw.a !== pw.b} onClick={changePw}><KeyRound size={16} /> Guardar contraseña</button>
+              <button className="btn" disabled={!pw.cur || pw.a.length < 6 || pw.a !== pw.b} onClick={changePw}><KeyRound size={16} /> Guardar contraseña</button>
             </div>
             {pw.a && (pw.a.length < 6 ? <p className="small" style={{ color: 'var(--red)' }}>Mínimo 6 caracteres.</p> : pw.a !== pw.b ? <p className="small" style={{ color: 'var(--red)' }}>No coinciden.</p> : null)}
           </div>

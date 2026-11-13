@@ -1,37 +1,20 @@
 import { useState } from 'react';
-import { ShieldCheck, Mail, Lock, User } from 'lucide-react';
-import { supabase } from '../lib/supabase';
-import { toEmail } from '../lib/utils';
+import { ShieldCheck, Mail, Lock } from 'lucide-react';
+import { useAuth } from '../lib/auth';
 
 export default function Login() {
-  const [mode, setMode] = useState('login');
-  const [form, setForm] = useState({ email: '', password: '', full_name: '' });
+  const { signIn } = useAuth();
+  const [form, setForm] = useState({ email: '', password: '' });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [forgot, setForgot] = useState(false);
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
   async function submit(e) {
     e.preventDefault(); setBusy(true); setMsg(null);
-    try {
-      if (mode === 'login') {
-        const { error } = await supabase.auth.signInWithPassword({ email: toEmail(form.email), password: form.password });
-        if (error) throw error;
-      } else if (mode === 'signup') {
-        const { data, error } = await supabase.auth.signUp({
-          email: toEmail(form.email), password: form.password,
-          options: { data: { full_name: form.full_name }, emailRedirectTo: window.location.origin + window.location.pathname }
-        });
-        if (error) throw error;
-        if (!data.session) setMsg({ ok: true, t: 'Cuenta creada. Revisa tu correo para confirmar y luego inicia sesión.' });
-      } else {
-        const { error } = await supabase.auth.resetPasswordForEmail(toEmail(form.email), { redirectTo: window.location.origin + window.location.pathname });
-        if (error) throw error;
-        setMsg({ ok: true, t: 'Te enviamos un enlace para restablecer la contraseña.' });
-      }
-    } catch (err) {
-      const t = err.message === 'Invalid login credentials' ? 'Correo o contraseña incorrectos' : err.message;
-      setMsg({ ok: false, t });
-    } finally { setBusy(false); }
+    try { await signIn(form.email, form.password); }
+    catch (err) { setMsg({ ok: false, t: err.message }); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -43,25 +26,19 @@ export default function Login() {
           <p style={{ opacity: .85 }}>Gestión del PAMEC y habilitación · San Andrés Islas</p>
         </div>
         <form className="card stack" onSubmit={submit} style={{ padding: 26 }}>
-          <h2>{mode === 'login' ? 'Iniciar sesión' : mode === 'signup' ? 'Crear cuenta' : 'Recuperar contraseña'}</h2>
-          {mode === 'signup' && (
-            <div className="search"><User size={17} /><input className="input" placeholder="Nombre completo" value={form.full_name} onChange={set('full_name')} required /></div>
-          )}
+          <h2>Iniciar sesión</h2>
           <div className="search"><Mail size={17} /><input className="input" type="text" placeholder="Usuario o correo electrónico" value={form.email} onChange={set('email')} required autoComplete="username" autoCapitalize="none" /></div>
-          {mode !== 'reset' && (
-            <div className="search"><Lock size={17} /><input className="input" type="password" placeholder="Contraseña" minLength={6} value={form.password} onChange={set('password')} required autoComplete={mode === 'login' ? 'current-password' : 'new-password'} /></div>
-          )}
+          <div className="search"><Lock size={17} /><input className="input" type="password" placeholder="Contraseña" value={form.password} onChange={set('password')} required autoComplete="current-password" /></div>
           {msg && <div className={'badge tone-' + (msg.ok ? 'green' : 'red')} style={{ whiteSpace: 'normal', padding: '10px 14px', borderRadius: 14 }}>{msg.t}</div>}
           <button className="btn lg block" disabled={busy}>
             {busy ? <span className="spinner" /> : <ShieldCheck size={18} />}
-            {mode === 'login' ? 'Entrar' : mode === 'signup' ? 'Registrarme' : 'Enviar enlace'}
+            Entrar
           </button>
-          <div className="row between small">
-            {mode === 'login'
-              ? <><a href="#" onClick={(e) => { e.preventDefault(); setMode('signup'); }}>Crear cuenta</a><a href="#" onClick={(e) => { e.preventDefault(); setMode('reset'); }}>¿Olvidaste la contraseña?</a></>
-              : <a href="#" onClick={(e) => { e.preventDefault(); setMode('login'); }}>← Volver a iniciar sesión</a>}
+          <div className="row small" style={{ justifyContent: 'flex-end' }}>
+            <a href="#" onClick={(e) => { e.preventDefault(); setForgot(!forgot); }}>¿Olvidaste la contraseña?</a>
           </div>
-          <p className="small muted">El primer usuario registrado será el administrador. Los demás deben ser invitados por el administrador.</p>
+          {forgot && <p className="small muted">Pide al administrador que te asigne una contraseña nueva desde el módulo <b>Equipo</b>. Luego podrás cambiarla en <b>Ajustes</b>.</p>}
+          <p className="small muted">Las cuentas las crea el administrador. Si aún no tienes una, solicítala.</p>
         </form>
       </div>
     </div>

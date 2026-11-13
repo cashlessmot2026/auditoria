@@ -2,5 +2,5 @@
 project_id = "ammeqhkgaksrhrsnxwys"
 
 [functions.gemini-auditor]
-# La función valida el usuario manualmente (compatible con llaves publicables sb_publishable_)
+# La función valida la sesión propia de la app (encabezado x-app-token)
 verify_jwt = false

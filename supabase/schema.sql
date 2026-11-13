@@ -1,38 +1,116 @@
 -- =====================================================================
 --  URUETA DERMATOLOGÍA · PWA PAMEC
 --  Esquema completo para Supabase (PostgreSQL)
---  Ejecutar UNA vez en: Supabase > SQL Editor > New query > Run
+--  Ejecutar en: Supabase > SQL Editor > New query > Run
 --  Es idempotente: puede volver a ejecutarse sin borrar datos.
+--
+--  AUTENTICACIÓN PROPIA (sin Supabase Auth):
+--   * El correo/usuario y la contraseña (cifrada con bcrypt) viven en
+--     public.profiles. El administrador asigna la contraseña inicial y
+--     cada persona puede cambiarla luego desde Ajustes.
+--   * Al iniciar sesión, la función app_login() entrega un token. La app
+--     lo envía en el encabezado "x-app-token" y las políticas RLS lo
+--     validan con public.current_uid().
+--   * Si ya tenías la versión anterior instalada, este script migra los
+--     perfiles y conserva las contraseñas existentes.
 -- =====================================================================
 
-create extension if not exists pgcrypto;
+create extension if not exists pgcrypto with schema extensions;
 
 -- ---------------------------------------------------------------------
--- 1. PERFILES E INVITACIONES
+-- 0. MIGRACIÓN: desconectar de Supabase Auth (versión anterior)
+-- ---------------------------------------------------------------------
+drop trigger if exists on_auth_user_created on auth.users;
+drop function if exists public.handle_new_user() cascade;
+
+-- Quita toda llave foránea de public.* que apunte a auth.users
+do $$ declare r record; begin
+  for r in
+    select con.conname, rel.relname
+    from pg_constraint con
+    join pg_class rel      on rel.oid = con.conrelid
+    join pg_namespace n    on n.oid = rel.relnamespace
+    join pg_class ref      on ref.oid = con.confrelid
+    join pg_namespace rn   on rn.oid = ref.relnamespace
+    where con.contype = 'f' and n.nspname = 'public' and rn.nspname = 'auth'
+  loop
+    execute format('alter table public.%I drop constraint %I', r.relname, r.conname);
+  end loop;
+end $$;
+
+-- Ya no hay auto-registro: las invitaciones dejan de existir
+drop table if exists public.invitations cascade;
+
+-- ---------------------------------------------------------------------
+-- 1. PERFILES (usuarios de la app) Y SESIONES
 -- ---------------------------------------------------------------------
 create table if not exists public.profiles (
-  id          uuid primary key references auth.users(id) on delete cascade,
-  email       text,
-  full_name   text,
-  cargo       text,
-  phone       text,
-  role        text not null default 'ejecutor' check (role in ('admin','ejecutor')),
-  active      boolean not null default false,
-  funciones   text,                       -- funciones individuales asignadas por el admin
-  created_at  timestamptz not null default now()
+  id              uuid primary key default gen_random_uuid(),
+  email           text not null,
+  full_name       text,
+  cargo           text,
+  phone           text,
+  role            text not null default 'ejecutor' check (role in ('admin','ejecutor')),
+  active          boolean not null default true,
+  funciones       text,                       -- funciones individuales asignadas por el admin
+  password_hash   text,                       -- bcrypt; nunca se expone a la app
+  failed_attempts int not null default 0,
+  locked_until    timestamptz,
+  last_login_at   timestamptz,
+  created_at      timestamptz not null default now()
 );
+-- Columnas nuevas si la tabla venía de la versión anterior
+alter table public.profiles alter column id set default gen_random_uuid();
+alter table public.profiles add column if not exists password_hash   text;
+alter table public.profiles add column if not exists failed_attempts int not null default 0;
+alter table public.profiles add column if not exists locked_until    timestamptz;
+alter table public.profiles add column if not exists last_login_at   timestamptz;
+update public.profiles set email = lower(trim(email)) where email is not null and email <> lower(trim(email));
+create unique index if not exists profiles_email_key on public.profiles (lower(email));
 
--- El admin registra aquí a quien podrá crear cuenta (control de acceso)
-create table if not exists public.invitations (
-  email       text primary key,
-  full_name   text,
-  cargo       text,
-  phone       text,
-  funciones   text,
-  role        text not null default 'ejecutor' check (role in ('admin','ejecutor')),
-  created_by  uuid references auth.users(id) on delete set null,
-  created_at  timestamptz not null default now()
+-- Conserva las contraseñas que ya existían en Supabase Auth (mismo formato bcrypt)
+do $$ begin
+  if exists (select 1 from information_schema.tables where table_schema = 'auth' and table_name = 'users') then
+    update public.profiles p
+       set password_hash = u.encrypted_password
+      from auth.users u
+     where u.id = p.id and p.password_hash is null and u.encrypted_password like '$2%';
+  end if;
+end $$;
+
+-- Sesiones: se guarda solo el hash SHA-256 del token
+create table if not exists public.app_sessions (
+  token_hash  text primary key,
+  profile_id  uuid not null references public.profiles(id) on delete cascade,
+  created_at  timestamptz not null default now(),
+  expires_at  timestamptz not null default now() + interval '30 days'
 );
+create index if not exists app_sessions_profile_idx on public.app_sessions(profile_id);
+
+-- Usuario de la petición actual (según el encabezado x-app-token)
+create or replace function public.request_token() returns text
+language sql stable as $$
+  select nullif(coalesce(nullif(current_setting('request.headers', true), ''), '{}')::json ->> 'x-app-token', '');
+$$;
+
+create or replace function public.current_uid() returns uuid
+language sql stable security definer set search_path = public, extensions as $$
+  select s.profile_id
+    from public.app_sessions s
+   where s.token_hash = encode(extensions.digest(public.request_token(), 'sha256'), 'hex')
+     and s.expires_at > now()
+   limit 1;
+$$;
+
+create or replace function public.is_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles where id = public.current_uid() and role = 'admin' and active);
+$$;
+
+create or replace function public.is_member() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles where id = public.current_uid() and active);
+$$;
 
 -- ---------------------------------------------------------------------
 -- 2. DATOS DE LA IPS
@@ -177,7 +255,7 @@ create index if not exists documents_req_idx on public.documents(requirement_id)
 -- ---------------------------------------------------------------------
 create table if not exists public.ai_messages (
   id          uuid primary key default gen_random_uuid(),
-  user_id     uuid not null references auth.users(id) on delete cascade default auth.uid(),
+  user_id     uuid not null references public.profiles(id) on delete cascade default public.current_uid(),
   role        text not null check (role in ('user','model')),
   content     text not null,
   attachment  text,
@@ -186,7 +264,7 @@ create table if not exists public.ai_messages (
 
 create table if not exists public.audit_log (
   id          bigint generated always as identity primary key,
-  user_id     uuid references auth.users(id) on delete set null default auth.uid(),
+  user_id     uuid references public.profiles(id) on delete set null default public.current_uid(),
   action      text not null,
   entity      text,
   entity_id   text,
@@ -194,61 +272,152 @@ create table if not exists public.audit_log (
   created_at  timestamptz not null default now()
 );
 
--- ---------------------------------------------------------------------
--- 9. FUNCIONES AUXILIARES Y TRIGGERS
--- ---------------------------------------------------------------------
-create or replace function public.is_admin() returns boolean
-language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.profiles where id = auth.uid() and role = 'admin' and active);
-$$;
-
-create or replace function public.is_member() returns boolean
-language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.profiles where id = auth.uid() and active);
-$$;
-
--- Alta automática de perfil al registrarse:
---   * el PRIMER usuario registrado queda como ADMIN activo
---   * los demás quedan activos solo si el admin los invitó (tabla invitations)
-create or replace function public.handle_new_user() returns trigger
-language plpgsql security definer set search_path = public as $$
-declare
-  inv public.invitations%rowtype;
-  n   int;
-begin
-  select count(*) into n from public.profiles;
-  if n = 0 then
-    insert into public.profiles (id, email, full_name, role, active)
-    values (new.id, new.email, coalesce(new.raw_user_meta_data->>'full_name', new.email), 'admin', true);
-  else
-    select * into inv from public.invitations where lower(email) = lower(new.email);
-    if found then
-      insert into public.profiles (id, email, full_name, cargo, phone, funciones, role, active)
-      values (new.id, new.email, coalesce(inv.full_name, new.raw_user_meta_data->>'full_name'),
-              inv.cargo, inv.phone, inv.funciones, inv.role, true);
-      delete from public.invitations where lower(email) = lower(new.email);
-    else
-      insert into public.profiles (id, email, full_name, role, active)
-      values (new.id, new.email, coalesce(new.raw_user_meta_data->>'full_name', new.email), 'ejecutor', false);
-    end if;
+-- Migración de tablas existentes: usuario por defecto y llaves hacia profiles
+alter table public.ai_messages alter column user_id set default public.current_uid();
+alter table public.audit_log   alter column user_id set default public.current_uid();
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'ai_messages_user_id_fkey') then
+    alter table public.ai_messages add constraint ai_messages_user_id_fkey
+      foreign key (user_id) references public.profiles(id) on delete cascade not valid;
   end if;
-  return new;
+  if not exists (select 1 from pg_constraint where conname = 'audit_log_user_id_fkey') then
+    alter table public.audit_log add constraint audit_log_user_id_fkey
+      foreign key (user_id) references public.profiles(id) on delete set null not valid;
+  end if;
 end $$;
 
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created after insert on auth.users
-  for each row execute function public.handle_new_user();
+-- ---------------------------------------------------------------------
+-- 9. INICIO DE SESIÓN Y CONTRASEÑAS (funciones RPC)
+-- ---------------------------------------------------------------------
+-- Datos públicos de un perfil (sin hash ni contadores)
+create or replace function public.profile_json(p public.profiles) returns json
+language sql stable as $$
+  select json_build_object('id', p.id, 'email', p.email, 'full_name', p.full_name, 'cargo', p.cargo,
+    'phone', p.phone, 'role', p.role, 'active', p.active, 'funciones', p.funciones,
+    'created_at', p.created_at, 'last_login_at', p.last_login_at);
+$$;
 
--- Un usuario no admin no puede cambiarse el rol ni activarse
+-- Iniciar sesión. Devuelve { ok, token, profile } o { ok:false, error }
+-- (no lanza excepción para que el contador de intentos fallidos se guarde)
+create or replace function public.app_login(p_email text, p_password text) returns json
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  p   public.profiles%rowtype;
+  tok text;
+begin
+  select * into p from public.profiles where lower(email) = lower(trim(p_email));
+  if not found or p.password_hash is null then
+    perform pg_sleep(0.4);
+    return json_build_object('ok', false, 'error', 'Usuario o contraseña incorrectos');
+  end if;
+  if p.locked_until is not null and p.locked_until > now() then
+    return json_build_object('ok', false, 'error', 'Demasiados intentos fallidos. Intenta de nuevo en 15 minutos.');
+  end if;
+  if p.password_hash <> extensions.crypt(coalesce(p_password, ''), p.password_hash) then
+    update public.profiles
+       set failed_attempts = failed_attempts + 1,
+           locked_until = case when failed_attempts + 1 >= 5 then now() + interval '15 minutes' end
+     where id = p.id;
+    perform pg_sleep(0.4);
+    return json_build_object('ok', false, 'error', 'Usuario o contraseña incorrectos');
+  end if;
+  if not p.active then
+    return json_build_object('ok', false, 'error', 'Tu perfil está inactivo. Pide al administrador que lo active.');
+  end if;
+
+  update public.profiles set failed_attempts = 0, locked_until = null, last_login_at = now() where id = p.id;
+  delete from public.app_sessions where expires_at < now();
+  tok := encode(extensions.gen_random_bytes(32), 'hex');
+  insert into public.app_sessions (token_hash, profile_id)
+  values (encode(extensions.digest(tok, 'sha256'), 'hex'), p.id);
+  return json_build_object('ok', true, 'token', tok, 'profile', public.profile_json(p));
+end $$;
+
+-- Perfil de la sesión actual (null si el token no es válido o venció)
+create or replace function public.app_me() returns json
+language sql stable security definer set search_path = public as $$
+  select public.profile_json(p) from public.profiles p where p.id = public.current_uid();
+$$;
+
+-- Cerrar sesión
+create or replace function public.app_logout() returns void
+language sql security definer set search_path = public, extensions as $$
+  delete from public.app_sessions
+   where token_hash = encode(extensions.digest(public.request_token(), 'sha256'), 'hex');
+$$;
+
+-- Cada persona cambia su propia contraseña (requiere la actual)
+create or replace function public.change_my_password(p_current text, p_new text) returns void
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  uid uuid := public.current_uid();
+  h   text;
+begin
+  if uid is null then raise exception 'Sesión no válida. Vuelve a iniciar sesión.'; end if;
+  if length(coalesce(p_new, '')) < 6 then raise exception 'La nueva contraseña debe tener mínimo 6 caracteres.'; end if;
+  select password_hash into h from public.profiles where id = uid;
+  if h is null or h <> extensions.crypt(coalesce(p_current, ''), h) then
+    raise exception 'La contraseña actual no es correcta.';
+  end if;
+  update public.profiles set password_hash = extensions.crypt(p_new, extensions.gen_salt('bf')) where id = uid;
+  -- Cierra las demás sesiones abiertas de esta persona
+  delete from public.app_sessions
+   where profile_id = uid
+     and token_hash <> encode(extensions.digest(public.request_token(), 'sha256'), 'hex');
+end $$;
+
+-- El admin crea un perfil con su contraseña inicial
+create or replace function public.admin_create_profile(
+  p_email text, p_password text, p_full_name text,
+  p_cargo text default null, p_phone text default null,
+  p_role text default 'ejecutor', p_funciones text default null
+) returns uuid
+language plpgsql security definer set search_path = public, extensions as $$
+declare new_id uuid;
+begin
+  if not public.is_admin() then raise exception 'Solo el administrador puede crear perfiles.'; end if;
+  if coalesce(trim(p_email), '') = '' then raise exception 'Falta el usuario o correo.'; end if;
+  if length(coalesce(p_password, '')) < 6 then raise exception 'La contraseña debe tener mínimo 6 caracteres.'; end if;
+  if exists (select 1 from public.profiles where lower(email) = lower(trim(p_email))) then
+    raise exception 'Ya existe un perfil con ese usuario o correo.';
+  end if;
+  insert into public.profiles (email, full_name, cargo, phone, role, active, funciones, password_hash)
+  values (lower(trim(p_email)), p_full_name, p_cargo, p_phone,
+          case when p_role = 'admin' then 'admin' else 'ejecutor' end, true, p_funciones,
+          extensions.crypt(p_password, extensions.gen_salt('bf')))
+  returning id into new_id;
+  return new_id;
+end $$;
+
+-- El admin asigna una contraseña nueva a cualquier perfil (y cierra sus sesiones)
+create or replace function public.admin_set_password(p_profile_id uuid, p_password text) returns void
+language plpgsql security definer set search_path = public, extensions as $$
+begin
+  if not public.is_admin() then raise exception 'Solo el administrador puede asignar contraseñas.'; end if;
+  if length(coalesce(p_password, '')) < 6 then raise exception 'La contraseña debe tener mínimo 6 caracteres.'; end if;
+  update public.profiles
+     set password_hash = extensions.crypt(p_password, extensions.gen_salt('bf')),
+         failed_attempts = 0, locked_until = null
+   where id = p_profile_id;
+  if not found then raise exception 'Perfil no encontrado.'; end if;
+  delete from public.app_sessions where profile_id = p_profile_id;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 10. TRIGGERS DE PROTECCIÓN
+-- ---------------------------------------------------------------------
+-- Desde la app, un no-admin no puede cambiarse rol, estado, funciones ni usuario.
+-- (Desde el SQL Editor o desde funciones internas no aplica.)
 create or replace function public.protect_profile_fields() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  -- auth.uid() nulo = SQL Editor / servidor: se permite el cambio
-  if auth.uid() is not null and not public.is_admin() then
+  if session_user in ('anon', 'authenticator', 'authenticated') and not public.is_admin() then
     new.role := old.role;
     new.active := old.active;
     new.funciones := old.funciones;
+    new.email := old.email;
   end if;
+  new.email := lower(trim(new.email));
   return new;
 end $$;
 drop trigger if exists protect_profile on public.profiles;
@@ -259,7 +428,7 @@ create trigger protect_profile before update on public.profiles
 create or replace function public.protect_requirement_fields() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  if not public.is_admin() then
+  if session_user in ('anon', 'authenticator', 'authenticated') and not public.is_admin() then
     new.code := old.code; new.category := old.category; new.title := old.title;
     new.description := old.description; new.norma := old.norma; new.evidence := old.evidence;
     new.assigned_to := old.assigned_to; new.due_date := old.due_date; new.priority := old.priority;
@@ -281,10 +450,38 @@ do $$ declare t text; begin
 end $$;
 
 -- ---------------------------------------------------------------------
--- 10. SEGURIDAD A NIVEL DE FILA (RLS)
+-- 11. PERMISOS Y SEGURIDAD A NIVEL DE FILA (RLS)
+--     La app usa la llave pública (rol anon); quién es cada persona lo
+--     decide current_uid() a partir del token de sesión.
 -- ---------------------------------------------------------------------
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on
+  public.ips_settings, public.requirements, public.activities, public.trainings,
+  public.goals, public.documents, public.ai_messages
+  to anon, authenticated;
+grant select, insert on public.audit_log to anon, authenticated;
+
+-- profiles: la app NUNCA puede leer ni escribir el hash de la contraseña
+revoke all on public.profiles from anon, authenticated;
+grant select (id, email, full_name, cargo, phone, role, active, funciones, created_at, last_login_at)
+  on public.profiles to anon, authenticated;
+grant update (email, full_name, cargo, phone, role, active, funciones)
+  on public.profiles to anon, authenticated;
+grant delete on public.profiles to anon, authenticated;
+
+-- sesiones: solo accesibles por las funciones internas
+revoke all on public.app_sessions from anon, authenticated;
+
+-- funciones que la app puede llamar
+grant execute on function public.app_login(text, text)              to anon, authenticated;
+grant execute on function public.app_me()                           to anon, authenticated;
+grant execute on function public.app_logout()                       to anon, authenticated;
+grant execute on function public.change_my_password(text, text)     to anon, authenticated;
+grant execute on function public.admin_create_profile(text, text, text, text, text, text, text) to anon, authenticated;
+grant execute on function public.admin_set_password(uuid, text)     to anon, authenticated;
+
 alter table public.profiles     enable row level security;
-alter table public.invitations  enable row level security;
+alter table public.app_sessions enable row level security;
 alter table public.ips_settings enable row level security;
 alter table public.requirements enable row level security;
 alter table public.activities   enable row level security;
@@ -296,71 +493,75 @@ alter table public.audit_log    enable row level security;
 
 do $$ declare r record; begin
   for r in select policyname, tablename from pg_policies where schemaname = 'public'
-    and tablename in ('profiles','invitations','ips_settings','requirements','activities','trainings','goals','documents','ai_messages','audit_log')
+    and tablename in ('profiles','app_sessions','ips_settings','requirements','activities','trainings','goals','documents','ai_messages','audit_log')
   loop execute format('drop policy if exists %I on public.%I', r.policyname, r.tablename); end loop;
 end $$;
 
--- profiles
-create policy profiles_select on public.profiles for select to authenticated
-  using (id = auth.uid() or public.is_member());
-create policy profiles_update on public.profiles for update to authenticated
-  using (id = auth.uid() or public.is_admin()) with check (id = auth.uid() or public.is_admin());
-create policy profiles_delete on public.profiles for delete to authenticated using (public.is_admin());
+-- profiles (cada quien edita su perfil; el admin edita todos)
+create policy profiles_select on public.profiles for select
+  using (id = public.current_uid() or public.is_member());
+create policy profiles_update on public.profiles for update
+  using (id = public.current_uid() or public.is_admin())
+  with check (id = public.current_uid() or public.is_admin());
+create policy profiles_delete on public.profiles for delete using (public.is_admin());
 
--- invitations
-create policy invitations_admin on public.invitations for all to authenticated
-  using (public.is_admin()) with check (public.is_admin());
+-- app_sessions: sin políticas = nadie desde la API
 
 -- ips_settings
-create policy settings_select on public.ips_settings for select to authenticated using (public.is_member());
-create policy settings_admin  on public.ips_settings for all to authenticated
+create policy settings_select on public.ips_settings for select using (public.is_member());
+create policy settings_admin  on public.ips_settings for all
   using (public.is_admin()) with check (public.is_admin());
 
 -- requirements
-create policy req_select on public.requirements for select to authenticated using (public.is_member());
-create policy req_insert on public.requirements for insert to authenticated with check (public.is_admin());
-create policy req_delete on public.requirements for delete to authenticated using (public.is_admin());
-create policy req_update on public.requirements for update to authenticated
-  using (public.is_admin() or assigned_to = auth.uid())
-  with check (public.is_admin() or assigned_to = auth.uid());
+create policy req_select on public.requirements for select using (public.is_member());
+create policy req_insert on public.requirements for insert with check (public.is_admin());
+create policy req_delete on public.requirements for delete using (public.is_admin());
+create policy req_update on public.requirements for update
+  using (public.is_admin() or (public.is_member() and assigned_to = public.current_uid()))
+  with check (public.is_admin() or (public.is_member() and assigned_to = public.current_uid()));
 
--- activities / trainings (responsable puede actualizar)
-create policy act_select on public.activities for select to authenticated using (public.is_member());
-create policy act_admin  on public.activities for all to authenticated using (public.is_admin()) with check (public.is_admin());
-create policy act_update on public.activities for update to authenticated
-  using (responsible = auth.uid()) with check (responsible = auth.uid());
+-- activities / trainings (el responsable puede actualizar)
+create policy act_select on public.activities for select using (public.is_member());
+create policy act_admin  on public.activities for all using (public.is_admin()) with check (public.is_admin());
+create policy act_update on public.activities for update
+  using (public.is_member() and responsible = public.current_uid())
+  with check (public.is_member() and responsible = public.current_uid());
 
-create policy tr_select on public.trainings for select to authenticated using (public.is_member());
-create policy tr_admin  on public.trainings for all to authenticated using (public.is_admin()) with check (public.is_admin());
-create policy tr_update on public.trainings for update to authenticated
-  using (responsible = auth.uid()) with check (responsible = auth.uid());
+create policy tr_select on public.trainings for select using (public.is_member());
+create policy tr_admin  on public.trainings for all using (public.is_admin()) with check (public.is_admin());
+create policy tr_update on public.trainings for update
+  using (public.is_member() and responsible = public.current_uid())
+  with check (public.is_member() and responsible = public.current_uid());
 
 -- goals
-create policy goals_select on public.goals for select to authenticated using (public.is_member());
-create policy goals_admin  on public.goals for all to authenticated using (public.is_admin()) with check (public.is_admin());
-create policy goals_update on public.goals for update to authenticated
-  using (assigned_to = auth.uid()) with check (assigned_to = auth.uid());
+create policy goals_select on public.goals for select using (public.is_member());
+create policy goals_admin  on public.goals for all using (public.is_admin()) with check (public.is_admin());
+create policy goals_update on public.goals for update
+  using (public.is_member() and assigned_to = public.current_uid())
+  with check (public.is_member() and assigned_to = public.current_uid());
 
 -- documents
-create policy docs_select on public.documents for select to authenticated using (public.is_member());
-create policy docs_insert on public.documents for insert to authenticated
-  with check (public.is_member() and uploaded_by = auth.uid());
-create policy docs_update on public.documents for update to authenticated
-  using (public.is_admin() or uploaded_by = auth.uid()) with check (public.is_admin() or uploaded_by = auth.uid());
-create policy docs_delete on public.documents for delete to authenticated
-  using (public.is_admin() or uploaded_by = auth.uid());
+create policy docs_select on public.documents for select using (public.is_member());
+create policy docs_insert on public.documents for insert
+  with check (public.is_member() and uploaded_by = public.current_uid());
+create policy docs_update on public.documents for update
+  using (public.is_admin() or (public.is_member() and uploaded_by = public.current_uid()))
+  with check (public.is_admin() or (public.is_member() and uploaded_by = public.current_uid()));
+create policy docs_delete on public.documents for delete
+  using (public.is_admin() or (public.is_member() and uploaded_by = public.current_uid()));
 
 -- ai_messages (cada usuario ve su conversación)
-create policy ai_own on public.ai_messages for all to authenticated
-  using (user_id = auth.uid() and public.is_member()) with check (user_id = auth.uid() and public.is_member());
+create policy ai_own on public.ai_messages for all
+  using (public.is_member() and user_id = public.current_uid())
+  with check (public.is_member() and user_id = public.current_uid());
 
 -- audit_log
-create policy log_select on public.audit_log for select to authenticated using (public.is_member());
-create policy log_insert on public.audit_log for insert to authenticated
-  with check (public.is_member() and user_id = auth.uid());
+create policy log_select on public.audit_log for select using (public.is_member());
+create policy log_insert on public.audit_log for insert
+  with check (public.is_member() and user_id = public.current_uid());
 
 -- ---------------------------------------------------------------------
--- 11. STORAGE: bucket privado para evidencias
+-- 12. STORAGE: bucket privado para evidencias
 -- ---------------------------------------------------------------------
 insert into storage.buckets (id, name, public, file_size_limit)
 values ('pamec-docs', 'pamec-docs', false, 20971520)
@@ -369,15 +570,18 @@ on conflict (id) do nothing;
 drop policy if exists pamec_docs_select on storage.objects;
 drop policy if exists pamec_docs_insert on storage.objects;
 drop policy if exists pamec_docs_delete on storage.objects;
-create policy pamec_docs_select on storage.objects for select to authenticated
+create policy pamec_docs_select on storage.objects for select
   using (bucket_id = 'pamec-docs' and public.is_member());
-create policy pamec_docs_insert on storage.objects for insert to authenticated
+create policy pamec_docs_insert on storage.objects for insert
   with check (bucket_id = 'pamec-docs' and public.is_member());
-create policy pamec_docs_delete on storage.objects for delete to authenticated
-  using (bucket_id = 'pamec-docs' and (public.is_admin() or owner = auth.uid()));
+create policy pamec_docs_delete on storage.objects for delete
+  using (bucket_id = 'pamec-docs' and (
+    public.is_admin() or exists (
+      select 1 from public.documents d
+       where d.file_path = storage.objects.name and d.uploaded_by = public.current_uid())));
 
 -- ---------------------------------------------------------------------
--- 12. VISTA DE AVANCE POR CATEGORÍA (útil para reportes)
+-- 13. VISTA DE AVANCE POR CATEGORÍA (útil para reportes)
 -- ---------------------------------------------------------------------
 create or replace view public.v_avance_categoria with (security_invoker = true) as
 select category,
@@ -389,4 +593,4 @@ select category,
              / nullif(count(*) filter (where status <> 'no_aplica'), 0), 1) as porcentaje
 from public.requirements group by category;
 
-grant select on public.v_avance_categoria to authenticated;
+grant select on public.v_avance_categoria to anon, authenticated;

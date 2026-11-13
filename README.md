@@ -22,15 +22,21 @@ Aplicación web progresiva (instalable en celular y PC) para gestionar el **Prog
 
 ### 1. Base de datos (Supabase)
 1. Entra a tu proyecto en Supabase → **SQL Editor** → **New query**.
-2. Pega todo el contenido de [`supabase/schema.sql`](supabase/schema.sql) y pulsa **Run**. Crea tablas, seguridad por filas (RLS), triggers y el bucket privado `pamec-docs`.
-3. En **Authentication → Sign In / Providers → Email** se recomienda desactivar *Confirm email* para que el admin pueda crear cuentas con contraseña temporal (si lo dejas activo, cada usuario confirma su correo).
-4. En **Authentication → URL Configuration** agrega la URL donde quede publicada la app (p. ej. `https://cashlessmot2026.github.io/auditoria/`).
+2. Pega todo el contenido de [`supabase/schema.sql`](supabase/schema.sql) y pulsa **Run**. Crea tablas, seguridad por filas (RLS), triggers, el bucket privado `pamec-docs` y las funciones de inicio de sesión.
+
+**Autenticación propia (no usa Supabase Auth):** el usuario/correo y la contraseña (cifrada con bcrypt) se guardan en la tabla `profiles`. La función `app_login` entrega un token de sesión que la app envía en el encabezado `x-app-token`; las políticas RLS lo validan con `current_uid()`. Tras 5 intentos fallidos el perfil se bloquea 15 minutos. Si venías de la versión con Supabase Auth, el script migra los perfiles y conserva las contraseñas.
 
 ### 2. Primer ingreso
-- Abre la app → **Crear cuenta**. **El primer usuario registrado queda como administrador.**
+- Si la base está vacía, crea el primer administrador desde el SQL Editor:
+  ```sql
+  insert into public.profiles (email, full_name, role, active, password_hash)
+  values ('admin@urueta.local', 'Administrador', 'admin', true,
+          extensions.crypt('CAMBIA-ESTA-CLAVE', extensions.gen_salt('bf')));
+  ```
+  (con usuario `admin`; los usuarios sin `@` se guardan como `usuario@urueta.local`).
 - En el Dashboard pulsa **Cargar plantilla normativa**.
 - En **Ajustes** completa NIT, código de habilitación y la fecha meta de la auditoría.
-- En **Equipo** crea los perfiles de los ejecutores. Nadie más puede entrar sin invitación del admin.
+- En **Equipo** crea los perfiles con su contraseña asignada. Cada persona puede cambiarla en **Ajustes → Cambiar contraseña**, y el admin puede asignar una nueva si alguien la olvida.
 
 ### 3. Auditor IA (Gemini) – Edge Function segura
 La llave de Gemini **no debe ir en el código público**. Se usa una Edge Function como intermediaria:

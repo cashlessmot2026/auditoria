@@ -2,7 +2,7 @@ import { Clock, LogOut, RefreshCw } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 
 export default function Pending() {
-  const { profile, session, signOut, refreshProfile } = useAuth();
+  const { profile, signOut, refreshProfile } = useAuth();
   return (
     <div className="center-screen">
       <div className="card stack" style={{ width: 'min(460px, 100%)', textAlign: 'center', padding: 30 }}>
@@ -10,7 +10,7 @@ export default function Pending() {
         <h2>Cuenta pendiente de activación</h2>
         <p className="muted">
           {profile
-            ? <>Hola <b>{profile.full_name}</b>. El administrador de Urueta Dermatología debe activar tu perfil ({session?.user?.email}) desde el módulo <b>Equipo</b>.</>
+            ? <>Hola <b>{profile.full_name}</b>. El administrador de Urueta Dermatología debe activar tu perfil ({profile.email}) desde el módulo <b>Equipo</b>.</>
             : <>No se encontró tu perfil. Verifica que el esquema de base de datos (<span className="mono">supabase/schema.sql</span>) esté instalado.</>}
         </p>
         <div className="row" style={{ justifyContent: 'center' }}>

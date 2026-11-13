@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { supabase, logAction } from './supabase';
+import { supabase, logAction, PROFILE_COLUMNS } from './supabase';
 import { useAuth } from './auth';
 import { REQUIREMENTS, ACTIVITY_TEMPLATE, TRAINING_TEMPLATE } from '../data/pamecCatalog';
 import { addDays } from './utils';
@@ -14,7 +14,7 @@ export function DataProvider({ children }) {
 
   const reload = useCallback(async () => {
     if (!profile?.active) return;
-    const q = (t, order = 'created_at') => supabase.from(t).select('*').order(order, { ascending: true });
+    const q = (t, order = 'created_at') => supabase.from(t).select(t === 'profiles' ? PROFILE_COLUMNS : '*').order(order, { ascending: true });
     const [s, r, a, t, g, p, d] = await Promise.all([
       supabase.from('ips_settings').select('*').eq('id', 1).maybeSingle(),
       supabase.from('requirements').select('*').order('sort').order('code'),

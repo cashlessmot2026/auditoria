@@ -6,7 +6,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-app-token",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -17,17 +17,17 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Método no permitido" }, 405);
 
-  // 1) Validar que quien llama sea un usuario activo de la app
-  const authHeader = req.headers.get("Authorization") ?? "";
+  // 1) Validar que quien llama tenga una sesión activa de la app (token propio)
+  const token = req.headers.get("x-app-token") ?? "";
+  if (!token) return json({ error: "No autenticado" }, 401);
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_ANON_KEY")!,
-    { global: { headers: { Authorization: authHeader } } },
+    { global: { headers: { "x-app-token": token } }, auth: { persistSession: false } },
   );
-  const { data: { user } } = await supabase.auth.getUser(authHeader.replace("Bearer ", ""));
-  if (!user) return json({ error: "No autenticado" }, 401);
-  const { data: profile } = await supabase.from("profiles").select("active").eq("id", user.id).single();
-  if (!profile?.active) return json({ error: "Usuario inactivo" }, 403);
+  const { data: profile } = await supabase.rpc("app_me");
+  if (!profile) return json({ error: "Sesión no válida" }, 401);
+  if (!profile.active) return json({ error: "Usuario inactivo" }, 403);
 
   // 2) Reenviar a Gemini
   const key = Deno.env.get("GEMINI_API_KEY");
