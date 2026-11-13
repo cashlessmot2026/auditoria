@@ -50,3 +50,11 @@ export const TR_STATUS = {
   reprogramada: { label: 'Reprogramada', tone: 'amber' },
   cancelada: { label: 'Cancelada', tone: 'gray' }
 };
+
+// Permite iniciar sesión con un usuario simple (ej. "david") además del correo
+export const USER_DOMAIN = 'urueta.local';
+export const toEmail = (u) => {
+  const v = String(u || '').trim().toLowerCase();
+  return v.includes('@') ? v : `${v}@${USER_DOMAIN}`;
+};
+export const displayUser = (email) => (email || '').endsWith('@' + USER_DOMAIN) ? email.split('@')[0] : email;

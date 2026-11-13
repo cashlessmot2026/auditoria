@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ShieldCheck, Mail, Lock, User } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { toEmail } from '../lib/utils';
 
 export default function Login() {
   const [mode, setMode] = useState('login');
@@ -13,17 +14,17 @@ export default function Login() {
     e.preventDefault(); setBusy(true); setMsg(null);
     try {
       if (mode === 'login') {
-        const { error } = await supabase.auth.signInWithPassword({ email: form.email.trim(), password: form.password });
+        const { error } = await supabase.auth.signInWithPassword({ email: toEmail(form.email), password: form.password });
         if (error) throw error;
       } else if (mode === 'signup') {
         const { data, error } = await supabase.auth.signUp({
-          email: form.email.trim(), password: form.password,
+          email: toEmail(form.email), password: form.password,
           options: { data: { full_name: form.full_name }, emailRedirectTo: window.location.origin + window.location.pathname }
         });
         if (error) throw error;
         if (!data.session) setMsg({ ok: true, t: 'Cuenta creada. Revisa tu correo para confirmar y luego inicia sesión.' });
       } else {
-        const { error } = await supabase.auth.resetPasswordForEmail(form.email.trim(), { redirectTo: window.location.origin + window.location.pathname });
+        const { error } = await supabase.auth.resetPasswordForEmail(toEmail(form.email), { redirectTo: window.location.origin + window.location.pathname });
         if (error) throw error;
         setMsg({ ok: true, t: 'Te enviamos un enlace para restablecer la contraseña.' });
       }
@@ -46,7 +47,7 @@ export default function Login() {
           {mode === 'signup' && (
             <div className="search"><User size={17} /><input className="input" placeholder="Nombre completo" value={form.full_name} onChange={set('full_name')} required /></div>
           )}
-          <div className="search"><Mail size={17} /><input className="input" type="email" placeholder="Correo electrónico" value={form.email} onChange={set('email')} required autoComplete="email" /></div>
+          <div className="search"><Mail size={17} /><input className="input" type="text" placeholder="Usuario o correo electrónico" value={form.email} onChange={set('email')} required autoComplete="username" autoCapitalize="none" /></div>
           {mode !== 'reset' && (
             <div className="search"><Lock size={17} /><input className="input" type="password" placeholder="Contraseña" minLength={6} value={form.password} onChange={set('password')} required autoComplete={mode === 'login' ? 'current-password' : 'new-password'} /></div>
           )}

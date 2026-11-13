@@ -6,7 +6,7 @@ import { supabase, signupClient, logAction } from '../lib/supabase';
 import { PageHead } from '../components/Layout';
 import { Modal, Field, Badge, Avatar, Progress, useToast } from '../components/ui';
 import { CATEGORIES } from '../data/pamecCatalog';
-import { pct, fmtDate } from '../lib/utils';
+import { pct, fmtDate, toEmail, displayUser } from '../lib/utils';
 
 export default function Team() {
   const { profiles, requirements, reload } = useData();
@@ -36,7 +36,7 @@ export default function Team() {
                 <Avatar name={p.full_name} size={46} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <b>{p.full_name}</b>
-                  <div className="small muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.email}</div>
+                  <div className="small muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayUser(p.email)}</div>
                 </div>
               </div>
               <div className="row" style={{ gap: 6 }}>
@@ -80,7 +80,7 @@ function CreateModal({ onClose, onDone, toast }) {
 
   async function submit() {
     setBusy(true);
-    const email = f.email.trim().toLowerCase();
+    const email = toEmail(f.email);
     const { error } = await supabase.from('invitations').upsert({ email, full_name: f.full_name, cargo: f.cargo, phone: f.phone, role: f.role, funciones: f.funciones });
     if (error) { setBusy(false); return toast(error.message); }
     let msg = 'Invitación creada. La persona debe registrarse con ' + email;
@@ -99,7 +99,7 @@ function CreateModal({ onClose, onDone, toast }) {
       <div className="stack">
         <div className="grid g-2">
           <Field label="Nombre completo"><input className="input" value={f.full_name} onChange={set('full_name')} /></Field>
-          <Field label="Correo"><input type="email" className="input" value={f.email} onChange={set('email')} /></Field>
+          <Field label="Usuario o correo"><input className="input" value={f.email} onChange={set('email')} placeholder="ej. maria o maria@correo.com" autoCapitalize="none" /></Field>
           <Field label="Cargo"><input className="input" value={f.cargo} onChange={set('cargo')} placeholder="Auxiliar de enfermería, Líder de calidad…" /></Field>
           <Field label="Teléfono"><input className="input" value={f.phone} onChange={set('phone')} /></Field>
           <Field label="Rol"><select className="input" value={f.role} onChange={set('role')}><option value="ejecutor">Ejecutor PAMEC</option><option value="admin">Administrador</option></select></Field>

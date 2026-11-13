@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Save, Download, LogOut, History, Building2, UserCircle, Smartphone } from 'lucide-react';
+import { Save, Download, LogOut, History, Building2, UserCircle, Smartphone, KeyRound } from 'lucide-react';
 import { useData } from '../lib/data';
 import { useAuth } from '../lib/auth';
 import { supabase, logAction } from '../lib/supabase';
 import { PageHead } from '../components/Layout';
 import { Field, useToast } from '../components/ui';
-import { fmtDate, todayISO } from '../lib/utils';
+import { fmtDate, todayISO, displayUser } from '../lib/utils';
 
 export default function Settings() {
   const { settings, requirements, activities, trainings, documents, profiles, reload } = useData();
@@ -25,6 +25,12 @@ export default function Settings() {
   }, []);
 
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value === '' ? null : e.target.value });
+  const [pw, setPw] = useState({ a: '', b: '' });
+  async function changePw() {
+    const { error } = await supabase.auth.updateUser({ password: pw.a });
+    if (error) return toast(error.message);
+    setPw({ a: '', b: '' }); logAction('Cambió su contraseña', 'profile', profile.id); toast('Contraseña actualizada ✔');
+  }
 
   async function saveIPS() {
     const { id, updated_at, ...rest } = f;
@@ -98,10 +104,20 @@ export default function Settings() {
               <Field label="Nombre"><input className="input" value={me.full_name || ''} onChange={(e) => setMe({ ...me, full_name: e.target.value })} /></Field>
               <Field label="Cargo"><input className="input" value={me.cargo} onChange={(e) => setMe({ ...me, cargo: e.target.value })} /></Field>
               <Field label="Teléfono"><input className="input" value={me.phone} onChange={(e) => setMe({ ...me, phone: e.target.value })} /></Field>
-              <Field label="Correo"><input className="input" value={profile.email || ''} disabled /></Field>
+              <Field label="Usuario / correo"><input className="input" value={displayUser(profile.email) || ''} disabled /></Field>
             </div>
             {profile.funciones && <div className="ai-box small"><b>Mis funciones:</b> {profile.funciones}</div>}
             <div className="row" style={{ justifyContent: 'flex-end' }}><button className="btn soft" onClick={saveMe}><Save size={16} /> Actualizar</button></div>
+            <div className="divider" />
+            <h3 className="row"><KeyRound size={18} /> Cambiar contraseña</h3>
+            <div className="grid g-2">
+              <Field label="Nueva contraseña"><input type="password" className="input" value={pw.a} onChange={(e) => setPw({ ...pw, a: e.target.value })} autoComplete="new-password" /></Field>
+              <Field label="Repetir contraseña"><input type="password" className="input" value={pw.b} onChange={(e) => setPw({ ...pw, b: e.target.value })} autoComplete="new-password" /></Field>
+            </div>
+            <div className="row" style={{ justifyContent: 'flex-end' }}>
+              <button className="btn" disabled={pw.a.length < 6 || pw.a !== pw.b} onClick={changePw}><KeyRound size={16} /> Guardar contraseña</button>
+            </div>
+            {pw.a && (pw.a.length < 6 ? <p className="small" style={{ color: 'var(--red)' }}>Mínimo 6 caracteres.</p> : pw.a !== pw.b ? <p className="small" style={{ color: 'var(--red)' }}>No coinciden.</p> : null)}
           </div>
 
           <div className="card stack">
