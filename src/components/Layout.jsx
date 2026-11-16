@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, ListChecks, CalendarRange, GraduationCap, Target, Users, Bot, Settings, LogOut } from 'lucide-react';
+import { LayoutDashboard, ListChecks, CalendarRange, GraduationCap, Target, Users, Bot, Settings, LogOut, FileStack } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import { Avatar } from './ui';
 
@@ -10,6 +10,7 @@ const LINKS = [
   { to: '/capacitaciones', icon: GraduationCap, label: 'Capacitaciones', short: 'Capacitar' },
   { to: '/metas', icon: Target, label: 'Metas y funciones', short: 'Metas' },
   { to: '/auditor', icon: Bot, label: 'Auditor IA', short: 'Auditor IA' },
+  { to: '/formatos', icon: FileStack, label: 'Formatos' },
   { to: '/equipo', icon: Users, label: 'Equipo', admin: true },
   { to: '/ajustes', icon: Settings, label: 'Ajustes' }
 ];
@@ -49,6 +50,7 @@ export default function Layout({ children }) {
             <div><b style={{ fontSize: '.95rem' }}>Urueta Dermatología</b><div className="small muted">PAMEC</div></div>
           </div>
           <div className="row" style={{ gap: 6 }}>
+            <NavLink to="/formatos" className="btn ghost icon" aria-label="Formatos"><FileStack size={17} /></NavLink>
             {isAdmin && <NavLink to="/equipo" className="btn ghost icon" aria-label="Equipo"><Users size={17} /></NavLink>}
             <NavLink to="/ajustes" className="btn ghost icon" aria-label="Ajustes"><Settings size={17} /></NavLink>
           </div>

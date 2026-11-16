@@ -7,6 +7,8 @@ import { supabase, logAction } from '../lib/supabase';
 import { PageHead } from '../components/Layout';
 import { Modal, Badge, StatusBadge, Field, Progress, Empty, useToast } from '../components/ui';
 import Evidence from '../components/Evidence';
+import { FormatButtons } from '../components/FormatDownload';
+import { formatsForRequirement } from '../data/formatos';
 import { CATEGORIES, PAMEC_PHASES } from '../data/pamecCatalog';
 import { REQ_STATUS, AI_STATUS, fmtDate, pct, daysUntil, todayISO } from '../lib/utils';
 
@@ -192,6 +194,17 @@ function RequirementModal({ req, onClose, profiles, canEdit, isAdmin, reload, to
               {canEdit && req.status !== 'cumplido' && <button className="btn sm" onClick={markDone}><Check size={14} /> Marcar cumplido</button>}
             </div>
           </div>
+          {formatsForRequirement(req.code).length > 0 && (
+            <div className="stack" style={{ gap: 8 }}>
+              <b className="small">Formatos para este requisito</b>
+              {formatsForRequirement(req.code).map((f) => (
+                <div key={f.id} className="row between" style={{ gap: 8, padding: '8px 12px', border: '1px solid var(--border)', borderRadius: 14 }}>
+                  <span className="small" style={{ minWidth: 0, flex: 1 }}><span className="mono muted">{f.id}</span> {f.title}</span>
+                  <FormatButtons f={f} />
+                </div>
+              ))}
+            </div>
+          )}
           <Evidence target={req} link={{ requirement_id: req.id }} />
         </div>
       )}

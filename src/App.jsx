@@ -12,6 +12,7 @@ import Goals from './pages/Goals';
 import Team from './pages/Team';
 import Auditor from './pages/Auditor';
 import Settings from './pages/Settings';
+import Formatos from './pages/Formatos';
 
 export default function App() {
   const { session, profile, loading, isAdmin } = useAuth();
@@ -30,6 +31,7 @@ export default function App() {
           <Route path="/capacitaciones" element={<Trainings />} />
           <Route path="/metas" element={<Goals />} />
           <Route path="/auditor" element={<Auditor />} />
+          <Route path="/formatos" element={<Formatos />} />
           <Route path="/equipo" element={isAdmin ? <Team /> : <Navigate to="/" />} />
           <Route path="/ajustes" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" />} />
