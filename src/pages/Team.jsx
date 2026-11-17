@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { UserPlus, Save, Trash2, ShieldCheck, Layers, KeyRound } from 'lucide-react';
+import { UserPlus, Save, Trash2, ShieldCheck, Layers, KeyRound, Pencil } from 'lucide-react';
 import { useData } from '../lib/data';
 import { useAuth } from '../lib/auth';
 import { supabase, logAction } from '../lib/supabase';
@@ -15,7 +15,17 @@ export default function Team() {
   const [creating, setCreating] = useState(false);
   const [edit, setEdit] = useState(null);
   const [bulk, setBulk] = useState(false);
+  const isAdmin = me?.role === 'admin';
 
+  async function removeProfile(p) {
+    if (p.id === me.id) return toast('No puedes eliminar tu propio perfil.');
+    if (!window.confirm('¿ELIMINAR definitivamente a ' + p.full_name + '?' + String.fromCharCode(10, 10) + 'Se borra su usuario y su conversación con el Auditor IA. Los requisitos que tenía asignados quedan sin responsable y sus evidencias se conservan. No se puede deshacer.' + String.fromCharCode(10, 10) + 'Si solo quieres que no ingrese, abre Editar y desmarca «Perfil activo».')) return;
+    const { data, error } = await supabase.from('profiles').delete().eq('id', p.id).select('id');
+    if (error) return toast(error.message);
+    if (!data?.length) return toast('No se pudo eliminar (sin permiso).');
+    logAction('Eliminó perfil', 'profile', p.id, p.full_name);
+    toast('Perfil eliminado ✔'); reload();
+  }
 
   return (
     <>
@@ -41,6 +51,12 @@ export default function Team() {
                 <Badge tone={p.active ? 'green' : 'red'}>{p.active ? 'Activo' : 'Inactivo'}</Badge>
                 {p.cargo && <Badge>{p.cargo}</Badge>}
               </div>
+              {isAdmin && (
+                <div className="row" style={{ gap: 8 }} onClick={(e) => e.stopPropagation()}>
+                  <button className="btn soft" onClick={() => setEdit(p)}><Pencil size={15} /> Editar</button>
+                  {p.id !== me.id && <button className="btn danger" onClick={() => removeProfile(p)}><Trash2 size={15} /> Eliminar</button>}
+                </div>
+              )}
               <div style={{ width: '100%' }}>
                 <div className="row between small"><span className="muted">{reqs.length} requisitos asignados</span><b>{pct(reqs.filter((r) => r.status === 'cumplido').length, reqs.length)}%</b></div>
                 <Progress value={pct(reqs.filter((r) => r.status === 'cumplido').length, reqs.length)} sm />
@@ -101,23 +117,29 @@ function EditModal({ p, me, onClose, reload, toast }) {
   const set = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
   const self = p.id === me.id;
   const [newPw, setNewPw] = useState('');
+  const [userTxt, setUserTxt] = useState(displayUser(p.email));
   async function resetPw() {
     const { error } = await supabase.rpc('admin_set_password', { p_profile_id: p.id, p_password: newPw });
     if (error) return toast(error.message);
     logAction('Asignó nueva contraseña', 'profile', p.id, p.full_name);
-    setNewPw(''); toast('Contraseña asignada ✔' + (self ? '' : '. Se cerraron sus sesiones abiertas.'));
+    setNewPw(''); toast('Contraseña asignada ✔' + '. Se cerraron sus sesiones abiertas.');
   }
 
   async function save() {
-    const { error } = await supabase.from('profiles').update({ full_name: f.full_name, cargo: f.cargo, phone: f.phone, funciones: f.funciones, role: self ? p.role : f.role, active: self ? true : f.active }).eq('id', p.id);
-    if (error) return toast(error.message);
-    logAction('Editó perfil', 'profile', p.id, f.full_name); toast('Guardado ✔'); reload(); onClose();
+    const email = toEmail(userTxt);
+    if (!userTxt.trim()) return toast('El usuario o correo no puede estar vacío.');
+    if (!f.full_name?.trim()) return toast('El nombre no puede estar vacío.');
+    const { error } = await supabase.from('profiles').update({ email, full_name: f.full_name, cargo: f.cargo, phone: f.phone, funciones: f.funciones, role: self ? p.role : f.role, active: self ? true : f.active }).eq('id', p.id);
+    if (error) return toast(/duplicate|unique/i.test(error.message) ? 'Ya existe otro perfil con ese usuario o correo.' : error.message);
+    logAction('Editó perfil', 'profile', p.id, f.full_name); toast(email !== p.email ? 'Guardado ✔. El nuevo usuario para ingresar es «' + displayUser(email) + '».' : 'Guardado ✔'); reload(); onClose();
   }
   async function remove() {
-    if (!window.confirm('¿Eliminar el perfil de ' + p.full_name + '? (No podrá ingresar hasta que lo vuelvas a activar.)')) return;
-    const { error } = await supabase.from('profiles').update({ active: false, role: 'ejecutor' }).eq('id', p.id);
+    if (!window.confirm('¿ELIMINAR definitivamente a ' + p.full_name + '? Se borra su usuario y su conversación con el Auditor IA; sus requisitos quedan sin responsable. No se puede deshacer.')) return;
+    const { data, error } = await supabase.from('profiles').delete().eq('id', p.id).select('id');
     if (error) return toast(error.message);
-    reload(); onClose();
+    if (!data?.length) return toast('No se pudo eliminar (sin permiso).');
+    logAction('Eliminó perfil', 'profile', p.id, p.full_name);
+    toast('Perfil eliminado ✔'); reload(); onClose();
   }
 
   return (
@@ -125,6 +147,7 @@ function EditModal({ p, me, onClose, reload, toast }) {
       <div className="stack">
         <div className="grid g-2">
           <Field label="Nombre"><input className="input" value={f.full_name || ''} onChange={set('full_name')} /></Field>
+          <Field label="Usuario o correo (para ingresar)"><input className="input" value={userTxt} onChange={(e) => setUserTxt(e.target.value)} autoCapitalize="none" autoComplete="off" /></Field>
           <Field label="Cargo"><input className="input" value={f.cargo || ''} onChange={set('cargo')} /></Field>
           <Field label="Teléfono"><input className="input" value={f.phone || ''} onChange={set('phone')} /></Field>
           <Field label="Rol"><select className="input" value={f.role} onChange={set('role')} disabled={self}><option value="ejecutor">Ejecutor PAMEC</option><option value="admin">Administrador</option></select></Field>
@@ -138,7 +161,7 @@ function EditModal({ p, me, onClose, reload, toast }) {
         )}
         <label className="row small" style={{ fontWeight: 600 }}><input type="checkbox" checked={!!f.active} onChange={set('active')} disabled={self} style={{ width: 18, height: 18, accentColor: 'var(--primary)' }} /> Perfil activo (puede ingresar y trabajar)</label>
         <div className="row between">
-          {!self ? <button className="btn danger" onClick={remove}><Trash2 size={16} /> Desactivar</button> : <span />}
+          {!self ? <button className="btn danger" onClick={remove}><Trash2 size={16} /> Eliminar perfil</button> : <span />}
           <button className="btn" onClick={save}><Save size={16} /> Guardar</button>
         </div>
       </div>

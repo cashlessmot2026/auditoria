@@ -1,6 +1,9 @@
 // Generación de formatos en PDF (jsPDF + autotable) y Excel (ExcelJS).
 // Las librerías se cargan solo cuando el usuario descarga, para no pesar en la app.
 import { FORMATS } from '../data/formatos';
+import LOGO from '../assets/logoData.js'; // logo I.P.S. Urueta Dermatología (fondo transparente)
+
+const LOGO_RATIO = 576 / 170; // ancho / alto
 
 const TEAL = [15, 118, 110];
 const MARK_ONLY = ['Marque X', 'Calificación', 'Respuesta'];
@@ -98,13 +101,20 @@ export async function buildPDF(f, ips) {
       ...base, startY: 8, margin: { left: M, right: M }, pageBreak: 'avoid',
       styles: { ...base.styles, fontSize: 7.5, cellPadding: 1.2 },
       body: [
-        [{ content: ipsName(ips) + '\n' + ipsLine(ips), rowSpan: 3, styles: { fontStyle: 'bold', fontSize: 9, textColor: TEAL, halign: 'center' } },
+        [{ content: '', rowSpan: 3, styles: { minCellHeight: 18 } },
           { content: 'SISTEMA OBLIGATORIO DE GARANTÍA DE CALIDAD EN SALUD', styles: { halign: 'center', fontStyle: 'bold', fontSize: 7 } },
           { content: 'Código: ' + f.id }],
         [{ content: f.title.toUpperCase(), rowSpan: 2, styles: { halign: 'center', fontStyle: 'bold', fontSize: 9 } }, { content: 'Versión: ' + VERSION + '   Fecha: ' + today() }],
         [{ content: `Página ${p} de ${pages}` }]
       ],
-      columnStyles: { 0: { cellWidth: CW * 0.27 }, 1: { cellWidth: CW * 0.5 }, 2: { cellWidth: CW * 0.23 } }
+      columnStyles: { 0: { cellWidth: CW * 0.27 }, 1: { cellWidth: CW * 0.5 }, 2: { cellWidth: CW * 0.23 } },
+      didDrawCell: (d) => {
+        if (d.section !== 'body' || d.row.index !== 0 || d.column.index !== 0) return;
+        const pad = 1.5;
+        const maxW = d.cell.width - 2 * pad, maxH = d.cell.height - 2 * pad;
+        const w = Math.min(maxW, maxH * LOGO_RATIO), h = w / LOGO_RATIO;
+        doc.addImage(LOGO, 'PNG', d.cell.x + (d.cell.width - w) / 2, d.cell.y + (d.cell.height - h) / 2, w, h);
+      }
     });
     doc.setFontSize(6.5); doc.setTextColor(120);
     doc.text('Formato sugerido generado con la app Urueta PAMEC. Ajústelo y apruébelo según el control de documentos de la IPS.', M, H - 6);
@@ -155,7 +165,15 @@ export async function buildXLSX(f, ips, wb) {
 
   // ---------- Encabezado ----------
   const c1 = Math.max(2, Math.round(G * 0.27)); const c3 = G - Math.max(2, Math.round(G * 0.23)) + 1;
-  merge(1, 1, 3, c1); put(1, 1, ipsName(ips) + '\n' + ipsLine(ips), { font: { bold: true, color: { argb: 'FF0F766E' }, size: 11 }, alignment: { horizontal: 'center' } });
+  merge(1, 1, 3, c1);
+  const logoId = wb.addImage({ base64: LOGO.split(',')[1], extension: 'png' });
+  // Logo centrado en el bloque combinado (filas 1-3 = 20+22+22 pt ≈ 85 px)
+  const colPx = Array.from({ length: c1 }, (_, i) => (ws.getColumn(i + 1).width || 8) * 7 + 5);
+  const rowPx = [20, 22, 22].map((pt) => (pt * 96) / 72);
+  const blockW = colPx.reduce((a, b) => a + b, 0), blockH = rowPx.reduce((a, b) => a + b, 0);
+  const lh = Math.min(blockH - 8, (blockW - 8) / LOGO_RATIO), lw = lh * LOGO_RATIO;
+  const at = (sizes, off) => { let i = 0; while (i < sizes.length - 1 && off >= sizes[i]) { off -= sizes[i]; i++; } return i + off / sizes[i]; };
+  ws.addImage(logoId, { tl: { col: at(colPx, (blockW - lw) / 2), row: at(rowPx, (blockH - lh) / 2) }, ext: { width: lw, height: lh } });
   merge(1, c1 + 1, 1, c3 - 1); put(1, c1 + 1, 'SISTEMA OBLIGATORIO DE GARANTÍA DE CALIDAD EN SALUD', { font: { bold: true, size: 8 }, alignment: { horizontal: 'center' } });
   merge(2, c1 + 1, 3, c3 - 1); put(2, c1 + 1, f.title.toUpperCase(), { font: { bold: true, size: 12 }, alignment: { horizontal: 'center' } });
   merge(1, c3, 1, G); put(1, c3, 'Código: ' + f.id, { font: { size: 9 } });
