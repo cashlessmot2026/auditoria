@@ -1,14 +1,14 @@
 import { useRef, useState } from 'react';
 import { Upload, Camera, FileText, Trash2, Eye, Sparkles, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import { supabase, BUCKET, logAction, signedUrl } from '../lib/supabase';
-import { askGemini, parseJSON, SUPPORTED_AI_MIME } from '../lib/gemini';
-import { AUDITOR_KNOWLEDGE, reviewPrompt } from '../lib/auditorPrompt';
-import { fileToBase64, fmtDate, prettySize, safeName, AI_STATUS } from '../lib/utils';
+import { extractText, releaseOcr, canAnalyze, LOCAL_ACCEPT } from '../lib/extractText';
+import { analyze, bestRequirements } from '../lib/localAuditor';
+import { fmtDate, prettySize, safeName, AI_STATUS } from '../lib/utils';
 import { useAuth } from '../lib/auth';
 import { useData, useProfileName } from '../lib/data';
 import { StatusBadge, useToast } from './ui';
 
-// Reduce fotos de cámara para subir rápido y caber en el límite de Gemini
+// Reduce fotos de cámara para subir rápido
 async function compressImage(file, maxSide = 2000, quality = 0.85) {
   if (!file.type.startsWith('image/') || file.type === 'image/heic' || file.size < 900_000) return file;
   try {
@@ -23,13 +23,13 @@ async function compressImage(file, maxSide = 2000, quality = 0.85) {
 }
 
 /**
- * target: { code, title, category, description, norma, evidence } -> lo que la IA debe verificar
+ * target: { code, title, category, description, norma, evidence } -> lo que el auditor debe verificar
  * link:   { requirement_id } | { activity_id } | { training_id }
  * onReviewed(result, doc) opcional
  */
 export default function Evidence({ target, link, onReviewed }) {
   const { profile, isAdmin } = useAuth();
-  const { documents, reload } = useData();
+  const { documents, requirements, reload } = useData();
   const name = useProfileName();
   const toast = useToast();
   const fileRef = useRef(); const camRef = useRef();
@@ -57,41 +57,41 @@ export default function Evidence({ target, link, onReviewed }) {
       await logAction('Subió evidencia', key.replace('_id', ''), id, file.name);
       if (key === 'requirement_id') await supabase.from('requirements').update({ status: 'en_proceso' }).eq('id', id).eq('status', 'pendiente');
       await reload();
-      if (SUPPORTED_AI_MIME.includes(file.type)) await review(doc, file);
+      if (canAnalyze(file.name, file.type)) await review(doc, file);
     }
     setBusy(null);
   }
 
   async function review(doc, file) {
     try {
-      setBusy('El Auditor IA está revisando el documento…'); setResult(null);
+      setBusy('El auditor está revisando el documento…'); setResult(null);
       let blob = file;
       if (!blob) {
         const { data, error } = await supabase.storage.from(BUCKET).download(doc.file_path);
         if (error) throw error; blob = data;
       }
       const mime = doc.mime_type || blob.type;
-      if (!SUPPORTED_AI_MIME.includes(mime)) throw new Error('La IA revisa PDF, imágenes o texto. Convierta el documento a PDF.');
-      const text = await askGemini({
-        system: AUDITOR_KNOWLEDGE, json: true,
-        contents: [{ role: 'user', parts: [{ text: reviewPrompt(target) }, { inlineData: { mimeType: mime, data: await fileToBase64(blob) } }] }]
-      });
-      const res = parseJSON(text);
-      if (!res) throw new Error('Respuesta de IA no válida');
-      const verdict = ['aprobado', 'observaciones', 'rechazado'].includes(res.veredicto) ? res.veredicto : 'observaciones';
-      const exp = /^\d{4}-\d{2}-\d{2}$/.test(res.fecha_vigencia_detectada || '') ? res.fecha_vigencia_detectada : null;
+      if (!canAnalyze(doc.file_name, mime)) throw new Error('Se revisan PDF, imágenes, Word (.docx), Excel (.xlsx) y texto. Convierta el documento a PDF.');
+      const { text, method, confidence } = await extractText(blob, doc.file_name, mime, setBusy);
+      const res = analyze({ text, req: target, ocrConfidence: method === 'ocr' ? confidence : null });
+      res.lectura = { pdf: 'texto del PDF', ocr: 'reconocimiento de imagen (OCR)', texto: 'texto', word: 'Word', excel: 'Excel' }[method];
+      if (!res.corresponde_al_requisito && key === 'requirement_id') {
+        const alt = bestRequirements(text, requirements.filter((r) => r.id !== id), 2).filter((x) => x.score >= 0.5);
+        if (alt.length) res.recomendaciones = [...res.recomendaciones, 'Este documento se parece más a: ' + alt.map((x) => `${x.req.code} ${x.req.title}`).join('; ') + '.'];
+      }
+      const verdict = res.veredicto;
       await supabase.from('documents').update({
-        ai_verdict: verdict, ai_score: Math.round(res.puntaje ?? 0), ai_feedback: res, reviewed_at: new Date().toISOString(),
-        ...(exp ? { expires_on: exp } : {})
+        ai_verdict: verdict, ai_score: res.puntaje, ai_feedback: res, reviewed_at: new Date().toISOString(),
+        ...(res.fecha_vigencia_detectada ? { expires_on: res.fecha_vigencia_detectada } : {})
       }).eq('id', doc.id);
       if (key === 'requirement_id') {
         await supabase.from('requirements').update({ ai_status: verdict, ai_feedback: res.resumen }).eq('id', id);
       }
-      await logAction('Revisión IA: ' + verdict, 'document', doc.id, doc.file_name);
-      setResult({ ...res, veredicto: verdict });
+      await logAction('Revisión del auditor: ' + verdict, 'document', doc.id, doc.file_name);
+      setResult(res);
       onReviewed?.(res, doc);
       await reload();
-    } catch (e) { toast(e.message); } finally { setBusy(null); }
+    } catch (e) { toast(e.message); } finally { setBusy(null); releaseOcr(); }
   }
 
   async function open(doc) {
@@ -115,12 +115,12 @@ export default function Evidence({ target, link, onReviewed }) {
   return (
     <div className="stack">
       <div className="drop">
-        <p className="small muted" style={{ marginBottom: 10 }}>Suba PDF o imágenes. El Auditor IA verificará si corresponde a lo solicitado.</p>
+        <p className="small muted" style={{ marginBottom: 10 }}>Suba PDF, imágenes, Word o Excel. El auditor verificará si corresponde a lo solicitado (se lee en su equipo; el documento no se envía a ninguna IA).</p>
         <div className="row" style={{ justifyContent: 'center' }}>
           <button type="button" className="btn" onClick={() => fileRef.current.click()} disabled={!!busy}><Upload size={16} /> Subir archivo</button>
           <button type="button" className="btn soft" onClick={() => camRef.current.click()} disabled={!!busy}><Camera size={16} /> Tomar foto</button>
         </div>
-        <input ref={fileRef} type="file" hidden multiple accept="application/pdf,image/*,.txt,.csv,.doc,.docx,.xls,.xlsx"
+        <input ref={fileRef} type="file" hidden multiple accept={LOCAL_ACCEPT + ',.doc,.xls'}
           onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }} />
         <input ref={camRef} type="file" hidden accept="image/*" capture="environment"
           onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }} />
@@ -143,8 +143,8 @@ export default function Evidence({ target, link, onReviewed }) {
                 </div>
               </div>
               <div className="row" style={{ gap: 4, flexWrap: 'nowrap' }}>
-                {d.ai_verdict !== 'sin_revisar' && <button className="btn ghost icon" title="Ver concepto IA" onClick={() => openFeedback(d)}><Sparkles size={15} /></button>}
-                <button className="btn soft sm" title="Revisar con IA" onClick={() => review(d)} disabled={!!busy}><Sparkles size={14} /> IA</button>
+                {d.ai_verdict !== 'sin_revisar' && <button className="btn ghost icon" title="Ver concepto del auditor" onClick={() => openFeedback(d)}><Sparkles size={15} /></button>}
+                <button className="btn soft sm" title="Revisar documento" onClick={() => review(d)} disabled={!!busy}><Sparkles size={14} /> Revisar</button>
                 <button className="btn ghost icon" title="Ver" onClick={() => open(d)}><Eye size={15} /></button>
                 {(isAdmin || d.uploaded_by === profile.id) && <button className="btn danger icon" title="Eliminar" onClick={() => remove(d)}><Trash2 size={15} /></button>}
               </div>
@@ -152,7 +152,7 @@ export default function Evidence({ target, link, onReviewed }) {
           ))}
         </div>
       )}
-      <p className="small muted">Tamaño máximo 20 MB por archivo. La IA revisa PDF e imágenes.</p>
+      <p className="small muted">Tamaño máximo 20 MB por archivo. El concepto es automático (reglas): una persona debe confirmarlo.</p>
     </div>
   );
 }
@@ -174,6 +174,7 @@ export function AiResult({ res }) {
       <List t="Hallazgos" items={res.hallazgos} />
       <List t="Faltantes" items={res.faltantes} />
       <List t="Recomendaciones" items={res.recomendaciones} />
+      <p className="small muted" style={{ marginTop: 10 }}>Concepto automático por reglas{res.lectura ? ' (lectura: ' + res.lectura + ')' : ''}. Confirme con criterio profesional; no verifica firmas manuscritas ni la veracidad del contenido.</p>
     </div>
   );
 }

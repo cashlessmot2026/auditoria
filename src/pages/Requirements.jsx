@@ -53,7 +53,7 @@ export default function Requirements() {
   }
 
   function exportCSV() {
-    const rows = [['Código', 'Categoría', 'Requisito', 'Norma', 'Evidencia', 'Estado', 'Revisión IA', 'Responsable', 'Fecha límite', 'Documentos']];
+    const rows = [['Código', 'Categoría', 'Requisito', 'Norma', 'Evidencia', 'Estado', 'Revisión del auditor', 'Responsable', 'Fecha límite', 'Documentos']];
     filtered.forEach((r) => rows.push([r.code, r.category, r.title, r.norma, r.evidence, REQ_STATUS[r.status]?.label, AI_STATUS[r.ai_status]?.label, name(r.assigned_to), r.due_date || '', documents.filter((d) => d.requirement_id === r.id).length]));
     const csv = rows.map((row) => row.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';')).join('\n');
     const a = document.createElement('a');
@@ -173,7 +173,7 @@ function RequirementModal({ req, onClose, profiles, canEdit, isAdmin, reload, to
     <Modal open onClose={onClose} wide title={req ? `${req.code} · ${req.title}` : 'Nuevo requisito'}>
       {req && (
         <div className="chip-group" style={{ marginBottom: 16 }}>
-          <button className={'chip' + (tab === 'evidencias' ? ' active' : '')} onClick={() => setTab('evidencias')}><Paperclip size={13} /> Evidencias y revisión IA</button>
+          <button className={'chip' + (tab === 'evidencias' ? ' active' : '')} onClick={() => setTab('evidencias')}><Paperclip size={13} /> Evidencias y revisión</button>
           <button className={'chip' + (tab === 'detalle' ? ' active' : '')} onClick={() => setTab('detalle')}>Detalle y asignación</button>
         </div>
       )}
@@ -187,7 +187,7 @@ function RequirementModal({ req, onClose, profiles, canEdit, isAdmin, reload, to
               <div><b className="small">Fundamento normativo</b><p className="small">{req.norma}</p></div>
               <div className="row small muted"><span>Periodicidad: {req.periodicity || '—'}</span><span>Límite: {fmtDate(req.due_date)}</span></div>
             </div>
-            {req.ai_feedback && <div className="ai-box"><b className="small row" style={{ gap: 6 }}><Sparkles size={14} /> Último concepto IA</b><p className="small" style={{ marginTop: 4 }}>{req.ai_feedback}</p></div>}
+            {req.ai_feedback && <div className="ai-box"><b className="small row" style={{ gap: 6 }}><Sparkles size={14} /> Último concepto del auditor</b><p className="small" style={{ marginTop: 4 }}>{req.ai_feedback}</p></div>}
             <div className="row">
               <StatusBadge map={REQ_STATUS} value={req.status} />
               <StatusBadge map={AI_STATUS} value={req.ai_status} />

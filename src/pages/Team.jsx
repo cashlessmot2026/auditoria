@@ -19,7 +19,7 @@ export default function Team() {
 
   async function removeProfile(p) {
     if (p.id === me.id) return toast('No puedes eliminar tu propio perfil.');
-    if (!window.confirm('¿ELIMINAR definitivamente a ' + p.full_name + '?' + String.fromCharCode(10, 10) + 'Se borra su usuario y su conversación con el Auditor IA. Los requisitos que tenía asignados quedan sin responsable y sus evidencias se conservan. No se puede deshacer.' + String.fromCharCode(10, 10) + 'Si solo quieres que no ingrese, abre Editar y desmarca «Perfil activo».')) return;
+    if (!window.confirm('¿ELIMINAR definitivamente a ' + p.full_name + '?' + String.fromCharCode(10, 10) + 'Se borra su usuario y su conversación con el Auditor. Los requisitos que tenía asignados quedan sin responsable y sus evidencias se conservan. No se puede deshacer.' + String.fromCharCode(10, 10) + 'Si solo quieres que no ingrese, abre Editar y desmarca «Perfil activo».')) return;
     const { data, error } = await supabase.from('profiles').delete().eq('id', p.id).select('id');
     if (error) return toast(error.message);
     if (!data?.length) return toast('No se pudo eliminar (sin permiso).');
@@ -134,7 +134,7 @@ function EditModal({ p, me, onClose, reload, toast }) {
     logAction('Editó perfil', 'profile', p.id, f.full_name); toast(email !== p.email ? 'Guardado ✔. El nuevo usuario para ingresar es «' + displayUser(email) + '».' : 'Guardado ✔'); reload(); onClose();
   }
   async function remove() {
-    if (!window.confirm('¿ELIMINAR definitivamente a ' + p.full_name + '? Se borra su usuario y su conversación con el Auditor IA; sus requisitos quedan sin responsable. No se puede deshacer.')) return;
+    if (!window.confirm('¿ELIMINAR definitivamente a ' + p.full_name + '? Se borra su usuario y su conversación con el Auditor; sus requisitos quedan sin responsable. No se puede deshacer.')) return;
     const { data, error } = await supabase.from('profiles').delete().eq('id', p.id).select('id');
     if (error) return toast(error.message);
     if (!data?.length) return toast('No se pudo eliminar (sin permiso).');

@@ -35,7 +35,7 @@ export default function Dashboard() {
     const trDone = trainings.filter((t) => t.status === 'realizada').length;
     const trValid = trainings.filter((t) => t.status !== 'cancelada').length;
     const compliance = pct(done, appl.length);
-    // Índice de preparación para la visita: 60% requisitos, 15% revisión IA, 15% cronograma, 10% capacitaciones
+    // Índice de preparación para la visita: 60% requisitos, 15% revisión del auditor, 15% cronograma, 10% capacitaciones
     const readiness = Math.round(compliance * 0.6 + pct(aiOk, appl.length) * 0.15 + pct(actDone, activities.length) * 0.15 + pct(trDone, trValid) * 0.10);
     const expiring = documents.filter((d) => d.expires_on && daysUntil(d.expires_on) <= 45);
     return { appl, done, prog, pend, aiOk, highPend, overdueReq, actDone, actOver, trDone, trValid, compliance, readiness, expiring };
@@ -109,10 +109,10 @@ export default function Dashboard() {
             <Ring value={k.readiness} label="preparación" />
             <div className="stack" style={{ flex: 1, minWidth: 220, gap: 10 }}>
               <h2 style={{ fontSize: '1.3rem' }}>Índice de preparación para auditoría</h2>
-              <p className="muted small">Combina requisitos cumplidos (60%), documentos aprobados por el Auditor IA (15%), cronograma ejecutado (15%) y capacitaciones realizadas (10%).</p>
+              <p className="muted small">Combina requisitos cumplidos (60%), documentos aprobados por el Auditor (15%), cronograma ejecutado (15%) y capacitaciones realizadas (10%).</p>
               <div className="row" style={{ gap: 18 }}>
                 <div><div style={{ fontSize: '1.4rem', fontWeight: 800 }}>{k.compliance}%</div><div className="small muted">Cumplimiento</div></div>
-                <div><div style={{ fontSize: '1.4rem', fontWeight: 800 }}>{k.aiOk}</div><div className="small muted">Aprobados IA</div></div>
+                <div><div style={{ fontSize: '1.4rem', fontWeight: 800 }}>{k.aiOk}</div><div className="small muted">Aprobados</div></div>
                 <div><div style={{ fontSize: '1.4rem', fontWeight: 800 }}>{metaDays == null ? '—' : metaDays}</div><div className="small muted">{metaDays == null ? 'Defina fecha meta' : 'días a la auditoría'}</div></div>
               </div>
             </div>
@@ -220,9 +220,9 @@ export default function Dashboard() {
           <h3>Alertas</h3>
           {k.overdueReq.slice(0, 4).map((r) => <div key={r.id} className="row small" style={{ flexWrap: 'nowrap' }}><Badge tone="red">Vencido</Badge><span>{r.code} · {r.title}</span></div>)}
           {k.expiring.slice(0, 4).map((d) => <div key={d.id} className="row small" style={{ flexWrap: 'nowrap' }}><Badge tone="amber">Vence {fmtDate(d.expires_on)}</Badge><span>{d.file_name}</span></div>)}
-          {requirements.filter((r) => r.ai_status === 'rechazado').slice(0, 3).map((r) => <div key={r.id} className="row small" style={{ flexWrap: 'nowrap' }}><Badge tone="red">IA rechazó</Badge><span>{r.code} · {r.title}</span></div>)}
+          {requirements.filter((r) => r.ai_status === 'rechazado').slice(0, 3).map((r) => <div key={r.id} className="row small" style={{ flexWrap: 'nowrap' }}><Badge tone="red">Auditor rechazó</Badge><span>{r.code} · {r.title}</span></div>)}
           {!k.overdueReq.length && !k.expiring.length && <div className="row small muted"><FileCheck2 size={16} /> Sin alertas críticas.</div>}
-          <Link to="/auditor" className="btn soft block" style={{ marginTop: 'auto' }}><Sparkles size={16} /> Iniciar pre-auditoría con IA</Link>
+          <Link to="/auditor" className="btn soft block" style={{ marginTop: 'auto' }}><Sparkles size={16} /> Iniciar pre-auditoría</Link>
         </div>
       </div>
       {!settings?.fecha_meta_auditoria && isAdmin && (

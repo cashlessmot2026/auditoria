@@ -32,10 +32,10 @@ export const REQ_STATUS = {
   no_aplica: { label: 'No aplica', tone: 'gray' }
 };
 export const AI_STATUS = {
-  sin_revisar: { label: 'Sin revisión IA', tone: 'gray' },
-  aprobado: { label: 'Aprobado IA', tone: 'green' },
+  sin_revisar: { label: 'Sin revisar', tone: 'gray' },
+  aprobado: { label: 'Aprobado', tone: 'green' },
   observaciones: { label: 'Con observaciones', tone: 'amber' },
-  rechazado: { label: 'Rechazado IA', tone: 'red' }
+  rechazado: { label: 'Rechazado', tone: 'red' }
 };
 export const ACT_STATUS = {
   pendiente: { label: 'Pendiente', tone: 'gray' },

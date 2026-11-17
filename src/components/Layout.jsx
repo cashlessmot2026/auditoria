@@ -9,7 +9,7 @@ const LINKS = [
   { to: '/cronograma', icon: CalendarRange, label: 'Cronograma', short: 'Cronograma' },
   { to: '/capacitaciones', icon: GraduationCap, label: 'Capacitaciones', short: 'Capacitar' },
   { to: '/metas', icon: Target, label: 'Metas y funciones', short: 'Metas' },
-  { to: '/auditor', icon: Bot, label: 'Auditor IA', short: 'Auditor IA' },
+  { to: '/auditor', icon: Bot, label: 'Auditor', short: 'Auditor' },
   { to: '/formatos', icon: FileStack, label: 'Formatos' },
   { to: '/equipo', icon: Users, label: 'Equipo', admin: true },
   { to: '/ajustes', icon: Settings, label: 'Ajustes' }
