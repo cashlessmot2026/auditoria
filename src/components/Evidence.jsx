@@ -147,6 +147,9 @@ export default function Evidence({ target, link, onReviewed }) {
   return (
     <div className="stack">
       <div className="drop">
+        <div style={{ marginBottom: 8 }}>
+          <span className={'badge tone-' + (ai.enabled ? 'primary' : 'green')}><Sparkles size={13} /> Revisa: {ai.enabled ? 'agente IA Gemini' : 'auditor propio (sin IA)'}</span>
+        </div>
         <p className="small muted" style={{ marginBottom: 10 }}>{'Suba PDF, imágenes, Word o Excel. El auditor verificará si corresponde a lo solicitado ' +
           '(' + (ai.enabled ? 'agente IA Gemini activado: el documento se envía a Google para su revisión' : 'se lee en su equipo; el documento no se envía a ninguna IA') + ').'}</p>
         <div className="row" style={{ justifyContent: 'center' }}>
