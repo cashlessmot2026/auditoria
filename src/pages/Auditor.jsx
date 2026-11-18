@@ -3,6 +3,9 @@ import { Send, Paperclip, Camera, Bot, Trash2, X, Sparkles, ClipboardCheck } fro
 import { supabase } from '../lib/supabase';
 import { extractText, releaseOcr, canAnalyze, LOCAL_ACCEPT } from '../lib/extractText';
 import { analyze, answerQuery, bestRequirements, pendingList, reqDetail } from '../lib/localAuditor';
+import { askGemini, SUPPORTED_AI_MIME } from '../lib/gemini';
+import { AUDITOR_KNOWLEDGE, buildContextSummary } from '../lib/auditorPrompt';
+import { fileToBase64 } from '../lib/utils';
 import { useData } from '../lib/data';
 import { useAuth } from '../lib/auth';
 import { PageHead } from '../components/Layout';
@@ -43,7 +46,8 @@ function reportText(res, req, auto, top) {
 }
 
 export default function Auditor() {
-  const { requirements } = useData();
+  const data = useData();
+  const { requirements, ai } = data;
   const { profile } = useAuth();
   const toast = useToast();
   const [msgs, setMsgs] = useState([]);
@@ -76,6 +80,23 @@ export default function Auditor() {
     return reportText(res, req, auto, top);
   }
 
+  async function answerGemini(attached, userText) {
+    const history = msgs.slice(-20).map((m) => ({ role: m.role, parts: [{ text: m.content + (m.attachment ? `\n[Adjuntó: ${m.attachment}]` : '') }] }));
+    const parts = [{ text: userText }];
+    if (attached) {
+      if (SUPPORTED_AI_MIME.includes(attached.type)) parts.push({ inlineData: { mimeType: attached.type, data: await fileToBase64(attached) } });
+      else {
+        if (!canAnalyze(attached.name, attached.type)) throw new Error('Adjunta PDF, imagen, Word (.docx), Excel (.xlsx) o texto.');
+        const { text: doc } = await extractText(attached, attached.name, attached.type, setBusy);
+        parts.push({ text: 'CONTENIDO DEL DOCUMENTO ADJUNTO:\n' + doc.slice(0, 60000) });
+      }
+    }
+    const req = requirements.find((r) => r.id === reqId);
+    const system = AUDITOR_KNOWLEDGE + '\n' + buildContextSummary(data) + `\nUsuario actual: ${profile.full_name} (${profile.role}).` +
+      (req ? `\nEl usuario quiere verificar contra el requisito [${req.code}] ${req.title}. Evidencia esperada: ${req.evidence || ''}. Norma: ${req.norma || ''}.` : '');
+    return (await askGemini({ apiKey: ai.api_key, system, contents: [...history, { role: 'user', parts }] })) || '(sin respuesta)';
+  }
+
   async function send(content = text) {
     if ((!content.trim() && !file) || busy) return;
     const userText = content.trim() || 'Revisa este documento.';
@@ -84,7 +105,14 @@ export default function Auditor() {
     const attached = file; setFile(null);
     try {
       await supabase.from('ai_messages').insert({ role: 'user', content: userText, attachment: userMsg.attachment });
-      const answer = attached ? await answerFile(attached, userText) : answerQuery(userText, requirements);
+      let answer;
+      if (ai.enabled) {
+        try { answer = await answerGemini(attached, userText); }
+        catch (e) {
+          const local = attached ? await answerFile(attached, userText) : answerQuery(userText, requirements);
+          answer = `⚠️ El agente IA no respondió (${e.message}). Respuesta del auditor por reglas:\n\n` + local;
+        }
+      } else answer = attached ? await answerFile(attached, userText) : answerQuery(userText, requirements);
       await supabase.from('ai_messages').insert({ role: 'model', content: answer });
       setMsgs((m) => [...m, { role: 'model', content: answer, created_at: new Date().toISOString() }]);
     } catch (e) {
@@ -110,7 +138,7 @@ export default function Auditor() {
 
   return (
     <>
-      <PageHead title="Auditor" sub="Compara tus documentos y fotos con lo que exige cada requisito (motor propio, sin IA externa)">
+      <PageHead title={ai.enabled ? 'Auditor IA' : 'Auditor'} sub={ai.enabled ? 'Agente Gemini activado: revisa documentos y responde sobre PAMEC y normativa' : 'Compara tus documentos y fotos con lo que exige cada requisito (motor propio por reglas y OCR)'}>
         {msgs.length > 0 && <button className="btn ghost" onClick={clear}><Trash2 size={16} /> Limpiar</button>}
       </PageHead>
       <div className="chat">
@@ -118,7 +146,7 @@ export default function Auditor() {
           {!msgs.length && (
             <div className="card hero stack" style={{ maxWidth: 720 }}>
               <div className="row"><Bot size={28} /><h2>Hola, soy tu Auditor PAMEC</h2></div>
-              <p className="muted">Adjunta un PDF, Word, Excel o una foto y comparo su contenido con lo que pide el requisito: formato correcto, términos exigidos, fechas, vigencia y si está diligenciado. También puedo decirte qué te falta, qué evidencia pide un requisito o qué formato usar. Todo se lee en tu equipo; ningún documento se envía a una IA.</p>
+              <p className="muted">Adjunta un PDF, Word, Excel o una foto y comparo su contenido con lo que pide el requisito: formato correcto, términos exigidos, fechas, vigencia y si está diligenciado. También puedo decirte qué te falta, qué evidencia pide un requisito o qué formato usar. {ai.enabled ? 'El agente IA (Gemini) está activado: los documentos que adjuntes se envían a Google para su revisión.' : 'Todo se lee en tu equipo; ningún documento se envía a una IA.'}</p>
             </div>
           )}
           {!msgs.length && (

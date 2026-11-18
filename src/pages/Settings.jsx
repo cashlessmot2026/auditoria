@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Save, Download, LogOut, History, Building2, UserCircle, Smartphone, KeyRound } from 'lucide-react';
+import { Save, Download, LogOut, History, Building2, UserCircle, Smartphone, KeyRound, Bot, Eye, EyeOff } from 'lucide-react';
 import { useData } from '../lib/data';
 import { useAuth } from '../lib/auth';
 import { supabase, logAction } from '../lib/supabase';
 import { PageHead } from '../components/Layout';
 import { Field, useToast } from '../components/ui';
+import { askGemini } from '../lib/gemini';
 import { fmtDate, todayISO, displayUser } from '../lib/utils';
 
 export default function Settings() {
@@ -15,8 +16,21 @@ export default function Settings() {
   const [me, setMe] = useState({ full_name: profile.full_name, phone: profile.phone || '', cargo: profile.cargo || '' });
   const [log, setLog] = useState([]);
   const [installEvt, setInstallEvt] = useState(null);
+  const [aiCfg, setAiCfg] = useState({ gemini_enabled: false, gemini_api_key: '' });
+  const [aiLoaded, setAiLoaded] = useState(false);
+  const [aiMsg, setAiMsg] = useState('');
+  const [showKey, setShowKey] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => { setF(settings || {}); }, [settings]);
+  useEffect(() => {
+    if (!isAdmin) return;
+    supabase.from('ai_config').select('gemini_enabled,gemini_api_key').eq('id', 1).maybeSingle().then(({ data, error }) => {
+      if (error) setAiMsg('Falta ejecutar el SQL «ai_config.sql» en Supabase (ver README). ' + error.message);
+      else if (data) setAiCfg({ gemini_enabled: !!data.gemini_enabled, gemini_api_key: data.gemini_api_key || '' });
+      setAiLoaded(true);
+    });
+  }, [isAdmin]);
   useEffect(() => {
     supabase.from('audit_log').select('*').order('created_at', { ascending: false }).limit(40).then(({ data }) => setLog(data || []));
     const h = (e) => { e.preventDefault(); setInstallEvt(e); };
@@ -37,6 +51,23 @@ export default function Settings() {
     const { error } = await supabase.from('ips_settings').upsert({ id: 1, ...rest });
     if (error) return toast(error.message);
     logAction('Actualizó datos de la IPS', 'settings'); toast('Datos de la IPS guardados ✔'); reload();
+  }
+  async function saveAi(next = aiCfg) {
+    const key = (next.gemini_api_key || '').trim();
+    if (next.gemini_enabled && !key) return toast('Pegue primero la llave API de Gemini');
+    const { error } = await supabase.from('ai_config').upsert({ id: 1, gemini_enabled: next.gemini_enabled, gemini_api_key: key || null });
+    if (error) { toast(error.message); return false; }
+    setAiCfg({ ...next, gemini_api_key: key });
+    logAction(next.gemini_enabled ? 'Activó el agente IA (Gemini)' : 'Desactivó el agente IA (Gemini)', 'settings');
+    toast(next.gemini_enabled ? 'Agente IA activado ✔' : 'Agente IA desactivado: se usa el auditor por reglas ✔');
+    reload(); return true;
+  }
+  async function testAi() {
+    setTesting(true);
+    try {
+      const out = await askGemini({ apiKey: aiCfg.gemini_api_key.trim(), contents: [{ role: 'user', parts: [{ text: 'Responde solo con la palabra: listo' }] }] });
+      toast('Gemini respondió: ' + out.slice(0, 40) + ' ✔');
+    } catch (e) { toast(e.message); } finally { setTesting(false); }
   }
   async function saveMe() {
     const { error } = await supabase.from('profiles').update(me).eq('id', profile.id);
@@ -120,6 +151,30 @@ export default function Settings() {
             </div>
             {pw.a && (pw.a.length < 6 ? <p className="small" style={{ color: 'var(--red)' }}>Mínimo 6 caracteres.</p> : pw.a !== pw.b ? <p className="small" style={{ color: 'var(--red)' }}>No coinciden.</p> : null)}
           </div>
+
+          {isAdmin && (
+            <div className="card stack">
+              <h2 className="row"><Bot size={20} /> Agente IA (Gemini)</h2>
+              <label className="row" style={{ gap: 10, cursor: 'pointer', flexWrap: 'nowrap' }}>
+                <input type="checkbox" style={{ width: 22, height: 22 }} checked={aiCfg.gemini_enabled} disabled={!aiLoaded || !!aiMsg}
+                  onChange={(e) => saveAi({ ...aiCfg, gemini_enabled: e.target.checked })} />
+                <span><b>{aiCfg.gemini_enabled ? 'Activado' : 'Desactivado'}</b> · {aiCfg.gemini_enabled ? 'Gemini audita y revisa los documentos y responde en la página Auditor.' : 'Se usa el auditor propio por reglas y OCR (sin enviar nada a una IA).'}</span>
+              </label>
+              <Field label="Llave API de Gemini">
+                <div className="row" style={{ flexWrap: 'nowrap' }}>
+                  <input className="input" type={showKey ? 'text' : 'password'} value={aiCfg.gemini_api_key} placeholder="AIza…" autoComplete="off"
+                    onChange={(e) => setAiCfg({ ...aiCfg, gemini_api_key: e.target.value })} />
+                  <button type="button" className="btn ghost icon" title={showKey ? 'Ocultar' : 'Mostrar'} onClick={() => setShowKey(!showKey)}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+                </div>
+              </Field>
+              <div className="row" style={{ justifyContent: 'flex-end' }}>
+                <button className="btn ghost" disabled={!aiCfg.gemini_api_key.trim() || testing} onClick={testAi}>{testing ? 'Probando…' : 'Probar llave'}</button>
+                <button className="btn" disabled={!aiLoaded || !!aiMsg} onClick={() => saveAi()}><Save size={16} /> Guardar llave</button>
+              </div>
+              {aiMsg && <p className="small" style={{ color: 'var(--red)' }}>{aiMsg}</p>}
+              <p className="small muted">Si Gemini falla (sin internet, llave inválida o cuota agotada), la app usa automáticamente el auditor por reglas. Con la IA activada, los documentos se envían a Google para su análisis. La llave la pueden leer los usuarios activos de la app mientras esté activada.</p>
+            </div>
+          )}
 
           <div className="card stack">
             <h2 className="row"><Download size={20} /> Reportes y app</h2>

@@ -3,7 +3,9 @@ import { Upload, Camera, FileText, Trash2, Eye, Sparkles, CheckCircle2, AlertTri
 import { supabase, BUCKET, logAction, signedUrl } from '../lib/supabase';
 import { extractText, releaseOcr, canAnalyze, LOCAL_ACCEPT } from '../lib/extractText';
 import { analyze, bestRequirements } from '../lib/localAuditor';
-import { fmtDate, prettySize, safeName, AI_STATUS } from '../lib/utils';
+import { askGemini, parseJSON, SUPPORTED_AI_MIME } from '../lib/gemini';
+import { AUDITOR_KNOWLEDGE, reviewPrompt } from '../lib/auditorPrompt';
+import { fmtDate, prettySize, safeName, fileToBase64, AI_STATUS } from '../lib/utils';
 import { useAuth } from '../lib/auth';
 import { useData, useProfileName } from '../lib/data';
 import { StatusBadge, useToast } from './ui';
@@ -29,7 +31,7 @@ async function compressImage(file, maxSide = 2000, quality = 0.85) {
  */
 export default function Evidence({ target, link, onReviewed }) {
   const { profile, isAdmin } = useAuth();
-  const { documents, requirements, reload } = useData();
+  const { documents, requirements, ai, reload } = useData();
   const name = useProfileName();
   const toast = useToast();
   const fileRef = useRef(); const camRef = useRef();
@@ -57,27 +59,57 @@ export default function Evidence({ target, link, onReviewed }) {
       await logAction('Subió evidencia', key.replace('_id', ''), id, file.name);
       if (key === 'requirement_id') await supabase.from('requirements').update({ status: 'en_proceso' }).eq('id', id).eq('status', 'pendiente');
       await reload();
-      if (canAnalyze(file.name, file.type)) await review(doc, file);
+      if (ai.enabled || canAnalyze(file.name, file.type)) await review(doc, file);
     }
     setBusy(null);
   }
 
+  async function reviewWithGemini(doc, blob, mime) {
+    setBusy('El agente IA (Gemini) está revisando el documento…');
+    const parts = [{ text: reviewPrompt(target) }];
+    if (SUPPORTED_AI_MIME.includes(mime)) parts.push({ inlineData: { mimeType: mime, data: await fileToBase64(blob) } });
+    else {
+      if (!canAnalyze(doc.file_name, mime)) throw new Error('formato no compatible');
+      const { text } = await extractText(blob, doc.file_name, mime, setBusy);
+      parts.push({ text: 'CONTENIDO DEL DOCUMENTO: ' + text.slice(0, 60000) });
+    }
+    const out = await askGemini({ apiKey: ai.api_key, system: AUDITOR_KNOWLEDGE, json: true, contents: [{ role: 'user', parts }] });
+    const r = parseJSON(out);
+    if (!r) throw new Error('respuesta no válida');
+    const veredicto = ['aprobado', 'observaciones', 'rechazado'].includes(r.veredicto) ? r.veredicto : 'observaciones';
+    const exp = /^\d{4}-\d{2}-\d{2}$/.test(r.fecha_vigencia_detectada || '') ? r.fecha_vigencia_detectada : null;
+    return { ...r, veredicto, puntaje: Math.round(r.puntaje ?? 0), fecha_vigencia_detectada: exp, motor: 'gemini', hallazgos: r.hallazgos || [], faltantes: r.faltantes || [], recomendaciones: r.recomendaciones || [] };
+  }
+
+  async function reviewLocal(doc, blob, mime) {
+    const { text, method, confidence } = await extractText(blob, doc.file_name, mime, setBusy);
+    const res = analyze({ text, req: target, ocrConfidence: method === 'ocr' ? confidence : null });
+    res.lectura = { pdf: 'texto del PDF', ocr: 'reconocimiento de imagen (OCR)', texto: 'texto', word: 'Word', excel: 'Excel' }[method];
+    res.motor = 'reglas';
+    if (!res.corresponde_al_requisito && key === 'requirement_id') {
+      const alt = bestRequirements(text, requirements.filter((r) => r.id !== id), 2).filter((x) => x.score >= 0.5);
+      if (alt.length) res.recomendaciones = [...res.recomendaciones, 'Este documento se parece más a: ' + alt.map((x) => `${x.req.code} ${x.req.title}`).join('; ') + '.'];
+    }
+    return res;
+  }
+
   async function review(doc, file) {
     try {
-      setBusy('El auditor está revisando el documento…'); setResult(null);
+      setBusy('Revisando el documento…'); setResult(null);
       let blob = file;
       if (!blob) {
         const { data, error } = await supabase.storage.from(BUCKET).download(doc.file_path);
         if (error) throw error; blob = data;
       }
       const mime = doc.mime_type || blob.type;
-      if (!canAnalyze(doc.file_name, mime)) throw new Error('Se revisan PDF, imágenes, Word (.docx), Excel (.xlsx) y texto. Convierta el documento a PDF.');
-      const { text, method, confidence } = await extractText(blob, doc.file_name, mime, setBusy);
-      const res = analyze({ text, req: target, ocrConfidence: method === 'ocr' ? confidence : null });
-      res.lectura = { pdf: 'texto del PDF', ocr: 'reconocimiento de imagen (OCR)', texto: 'texto', word: 'Word', excel: 'Excel' }[method];
-      if (!res.corresponde_al_requisito && key === 'requirement_id') {
-        const alt = bestRequirements(text, requirements.filter((r) => r.id !== id), 2).filter((x) => x.score >= 0.5);
-        if (alt.length) res.recomendaciones = [...res.recomendaciones, 'Este documento se parece más a: ' + alt.map((x) => `${x.req.code} ${x.req.title}`).join('; ') + '.'];
+      let res = null;
+      if (ai.enabled) {
+        try { res = await reviewWithGemini(doc, blob, mime); }
+        catch (e) { toast('Agente IA no disponible (' + e.message + '). Se usa el auditor por reglas.'); }
+      }
+      if (!res) {
+        if (!canAnalyze(doc.file_name, mime)) throw new Error('Se revisan PDF, imágenes, Word (.docx), Excel (.xlsx) y texto. Convierta el documento a PDF.');
+        res = await reviewLocal(doc, blob, mime);
       }
       const verdict = res.veredicto;
       await supabase.from('documents').update({
@@ -87,7 +119,7 @@ export default function Evidence({ target, link, onReviewed }) {
       if (key === 'requirement_id') {
         await supabase.from('requirements').update({ ai_status: verdict, ai_feedback: res.resumen }).eq('id', id);
       }
-      await logAction('Revisión del auditor: ' + verdict, 'document', doc.id, doc.file_name);
+      await logAction((res.motor === 'gemini' ? 'Revisión del agente IA: ' : 'Revisión del auditor: ') + verdict, 'document', doc.id, doc.file_name);
       setResult(res);
       onReviewed?.(res, doc);
       await reload();
@@ -115,7 +147,8 @@ export default function Evidence({ target, link, onReviewed }) {
   return (
     <div className="stack">
       <div className="drop">
-        <p className="small muted" style={{ marginBottom: 10 }}>Suba PDF, imágenes, Word o Excel. El auditor verificará si corresponde a lo solicitado (se lee en su equipo; el documento no se envía a ninguna IA).</p>
+        <p className="small muted" style={{ marginBottom: 10 }}>{'Suba PDF, imágenes, Word o Excel. El auditor verificará si corresponde a lo solicitado ' +
+          '(' + (ai.enabled ? 'agente IA Gemini activado: el documento se envía a Google para su revisión' : 'se lee en su equipo; el documento no se envía a ninguna IA') + ').'}</p>
         <div className="row" style={{ justifyContent: 'center' }}>
           <button type="button" className="btn" onClick={() => fileRef.current.click()} disabled={!!busy}><Upload size={16} /> Subir archivo</button>
           <button type="button" className="btn soft" onClick={() => camRef.current.click()} disabled={!!busy}><Camera size={16} /> Tomar foto</button>
@@ -152,7 +185,7 @@ export default function Evidence({ target, link, onReviewed }) {
           ))}
         </div>
       )}
-      <p className="small muted">Tamaño máximo 20 MB por archivo. El concepto es automático (reglas): una persona debe confirmarlo.</p>
+      <p className="small muted">Tamaño máximo 20 MB por archivo. El concepto es automático ({ai.enabled ? 'agente IA' : 'reglas'}): una persona debe confirmarlo.</p>
     </div>
   );
 }
@@ -174,7 +207,7 @@ export function AiResult({ res }) {
       <List t="Hallazgos" items={res.hallazgos} />
       <List t="Faltantes" items={res.faltantes} />
       <List t="Recomendaciones" items={res.recomendaciones} />
-      <p className="small muted" style={{ marginTop: 10 }}>Concepto automático por reglas{res.lectura ? ' (lectura: ' + res.lectura + ')' : ''}. Confirme con criterio profesional; no verifica firmas manuscritas ni la veracidad del contenido.</p>
+      <p className="small muted" style={{ marginTop: 10 }}>{res.motor === 'gemini' ? 'Concepto del agente IA (Gemini).' : 'Concepto automático por reglas' + (res.lectura ? ' (lectura: ' + res.lectura + ')' : '') + '.'} Confirme con criterio profesional; no verifica firmas manuscritas ni la veracidad del contenido.</p>
     </div>
   );
 }

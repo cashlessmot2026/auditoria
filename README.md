@@ -38,8 +38,10 @@ Aplicación web progresiva (instalable en celular y PC) para gestionar el **Prog
 - En **Ajustes** completa NIT, código de habilitación y la fecha meta de la auditoría.
 - En **Equipo** crea los perfiles con su contraseña asignada. Cada persona puede cambiarla en **Ajustes → Cambiar contraseña**, y el admin puede asignar una nueva si alguien la olvida.
 
-### 3. Auditor (motor propio, sin IA externa)
-El Auditor ya **no usa Gemini ni ninguna API de IA**: es un motor de reglas (`src/lib/localAuditor.js`) que corre en el navegador. Lee PDF (`pdfjs-dist`), imágenes con OCR (`tesseract.js`, descarga una sola vez el idioma español), Word y Excel, y lo compara con el requisito y con los 62 formatos: código de formato, términos exigidos, fechas, vigencia, si el formato está diligenciado y si corresponde a otro requisito. No verifica firmas manuscritas. No requiere secretos ni Edge Functions (la carpeta `supabase/functions/gemini-auditor` ya no se usa).
+### 3. Auditor: reglas + OCR (siempre) y agente IA Gemini (opcional)
+- **Por defecto** (interruptor apagado) funciona el auditor propio por reglas (`src/lib/localAuditor.js`): corre en el navegador, lee PDF, imágenes con OCR, Word y Excel y no envía nada a ninguna IA.
+- **Agente IA Gemini**: en **Ajustes → Agente IA (Gemini)** el administrador pega la llave API, la prueba y activa el interruptor. Con él activado, Gemini revisa las evidencias y responde en la página Auditor; si falla (sin internet, llave inválida, cuota), la app usa el auditor por reglas automáticamente. Apagar el interruptor vuelve al auditor por reglas.
+- Requiere ejecutar una vez `supabase/ai_config.sql` en el SQL Editor de Supabase (crea la tabla `ai_config`; ya incluido al final de `schema.sql`). No hace falta Edge Function.
 
 ### 4. Ejecutar en local
 ```bash

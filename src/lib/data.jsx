@@ -9,25 +9,27 @@ const DataCtx = createContext(null);
 export function DataProvider({ children }) {
   const { profile } = useAuth();
   const [state, setState] = useState({
-    settings: null, requirements: [], activities: [], trainings: [], goals: [], profiles: [], documents: [], loaded: false, error: null
+    settings: null, requirements: [], activities: [], trainings: [], goals: [], profiles: [], documents: [], ai: { enabled: false, api_key: null }, loaded: false, error: null
   });
 
   const reload = useCallback(async () => {
     if (!profile?.active) return;
     const q = (t, order = 'created_at') => supabase.from(t).select(t === 'profiles' ? PROFILE_COLUMNS : '*').order(order, { ascending: true });
-    const [s, r, a, t, g, p, d] = await Promise.all([
+    const [s, r, a, t, g, p, d, cfg] = await Promise.all([
       supabase.from('ips_settings').select('*').eq('id', 1).maybeSingle(),
       supabase.from('requirements').select('*').order('sort').order('code'),
       q('activities', 'start_date'),
       q('trainings', 'scheduled_date'),
       q('goals', 'due_date'),
       q('profiles', 'full_name'),
-      supabase.from('documents').select('id,requirement_id,activity_id,training_id,file_name,file_path,mime_type,size_bytes,ai_verdict,ai_score,created_at,expires_on,uploaded_by').order('created_at', { ascending: false })
+      supabase.from('documents').select('id,requirement_id,activity_id,training_id,file_name,file_path,mime_type,size_bytes,ai_verdict,ai_score,created_at,expires_on,uploaded_by').order('created_at', { ascending: false }),
+      supabase.rpc('ai_get_config')
     ]);
     const error = [s, r, a, t, g, p, d].find((x) => x.error)?.error?.message || null;
     setState({
       settings: s.data, requirements: r.data || [], activities: a.data || [], trainings: t.data || [],
-      goals: g.data || [], profiles: p.data || [], documents: d.data || [], loaded: true, error
+      goals: g.data || [], profiles: p.data || [], documents: d.data || [],
+      ai: cfg.data?.enabled ? { enabled: true, api_key: cfg.data.api_key } : { enabled: false, api_key: null }, loaded: true, error
     });
   }, [profile?.active]);
 
