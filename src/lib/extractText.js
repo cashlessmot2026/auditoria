@@ -14,10 +14,22 @@ async function getOcr(onProgress) {
 }
 export async function releaseOcr() { if (ocrWorker) { try { await ocrWorker.terminate(); } catch { /* */ } ocrWorker = null; } }
 
+import { findSlots, measureInk } from './signatureInk';
+
 async function ocrImage(source, onProgress) {
   const w = await getOcr(onProgress);
   const { data } = await w.recognize(source);
-  return { text: data.text || '', confidence: data.confidence ?? 0 };
+  const words = (data.words || []).filter((x) => x.confidence >= 70 && x.bbox).map((x) => ({ t: x.text, x0: x.bbox.x0, y0: x.bbox.y0, x1: x.bbox.x1, y1: x.bbox.y1 }));
+  return { text: data.text || '', confidence: data.confidence ?? 0, words };
+}
+
+// Mide los espacios de firma de una página ya dibujada en un canvas
+function inspectSignatures(canvas, words, minPx) {
+  try {
+    const slots = findSlots(words, canvas.width, canvas.height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    return slots.map((sl) => ({ kind: sl.kind, ...measureInk(ctx, sl, words, { minPx }) }));
+  } catch { return []; }
 }
 
 // Imagen -> canvas reducido y en escala de grises/contraste (mejora el OCR de fotos de celular)
@@ -26,7 +38,7 @@ async function prepareImage(blob) {
   const scale = Math.min(1, 2400 / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas');
   c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
-  const ctx = c.getContext('2d'); ctx.drawImage(bmp, 0, 0, c.width, c.height);
+  const ctx = c.getContext('2d', { willReadFrequently: true }); ctx.drawImage(bmp, 0, 0, c.width, c.height);
   const img = ctx.getImageData(0, 0, c.width, c.height); const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
     const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
@@ -43,26 +55,55 @@ async function pdfText(blob, onProgress) {
   pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
   const pdf = await pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
   const pages = Math.min(pdf.numPages, 30);
-  let text = '';
+  const SCALE = 2;
+  let text = ''; const slots = [];
   for (let i = 1; i <= pages; i++) {
     const p = await pdf.getPage(i);
     const tc = await p.getTextContent();
-    text += tc.items.map((it) => it.str).join(' ') + '\n';
+    // conserva los saltos de línea (misma altura = misma línea)
+    let lastY = null, line = '';
+    for (const it of tc.items) {
+      const y = it.transform[5];
+      if (lastY !== null && Math.abs(y - lastY) > 2) { text += line + '\n'; line = ''; }
+      line += (line ? ' ' : '') + it.str; lastY = y;
+    }
+    text += line + '\n';
+    // espacios de firma de la página (solo se dibuja si hay candidatos)
+    if (i <= 10) {
+      try {
+        const vp = p.getViewport({ scale: SCALE });
+        const words = tc.items.filter((it) => it.str.trim()).map((it) => {
+          const [vx, vy] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+          const h = (it.height || Math.abs(it.transform[3]) || 8) * SCALE;
+          return { t: it.str, x0: vx, x1: vx + (it.width || 0) * SCALE, y0: vy - h, y1: vy + h * 0.25 };
+        });
+        if (findSlots(words, vp.width, vp.height).length) {
+          const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+          const ctx = c.getContext('2d', { willReadFrequently: true });
+          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+          await p.render({ canvasContext: ctx, viewport: vp }).promise;
+          slots.push(...inspectSignatures(c, words, 110));
+        }
+      } catch { /* la verificación visual nunca debe romper la lectura */ }
+    }
   }
   // Si casi no hay texto, es un escaneo: se aplica OCR a las primeras páginas
   if (text.replace(/\s+/g, '').length < 40 * Math.min(pages, 3)) {
-    let ocr = '', conf = 0, n = 0;
+    let ocr = '', conf = 0, k = 0; const oslots = [];
     for (let i = 1; i <= Math.min(pdf.numPages, 6); i++) {
       onProgress?.(`Leyendo página ${i} (OCR)…`);
       const p = await pdf.getPage(i);
       const vp = p.getViewport({ scale: 2 });
       const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
-      await p.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-      const r = await ocrImage(c); ocr += r.text + '\n'; conf += r.confidence; n++;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await p.render({ canvasContext: ctx, viewport: vp }).promise;
+      const r = await ocrImage(c); ocr += r.text + '\n'; conf += r.confidence; k++;
+      oslots.push(...inspectSignatures(c, r.words, 250));
     }
-    return { text: ocr, method: 'ocr', confidence: n ? conf / n : 0 };
+    return { text: ocr, method: 'ocr', confidence: k ? conf / k : 0, signatures: oslots };
   }
-  return { text, method: 'pdf', confidence: null };
+  return { text, method: 'pdf', confidence: null, signatures: slots };
 }
 
 async function docxText(blob) {
@@ -86,7 +127,7 @@ async function xlsxText(blob) {
 }
 
 /**
- * @returns {{text:string, method:'pdf'|'ocr'|'texto'|'word'|'excel', confidence:number|null}}
+ * @returns {{text:string, method:'pdf'|'ocr'|'texto'|'word'|'excel', confidence:number|null, signatures?:{kind:string, ink:boolean|null, px:number}[]}}
  */
 export async function extractText(blob, name = '', mime = '', onProgress) {
   const ext = (name.split('.').pop() || '').toLowerCase();
@@ -95,8 +136,9 @@ export async function extractText(blob, name = '', mime = '', onProgress) {
   if (type.startsWith('image/') || ['jpg', 'jpeg', 'png', 'webp', 'bmp'].includes(ext)) {
     if (/hei[cf]/.test(type) || ['heic', 'heif'].includes(ext)) throw new Error('El formato HEIC no se puede leer. Tome la foto en formato JPG o suba el PDF.');
     onProgress?.('Leyendo la imagen (OCR)…');
-    const r = await ocrImage(await prepareImage(blob), (p) => onProgress?.(`Leyendo la imagen (OCR)… ${p}%`));
-    return { text: r.text, method: 'ocr', confidence: r.confidence };
+    const canvas = await prepareImage(blob);
+    const r = await ocrImage(canvas, (p) => onProgress?.(`Leyendo la imagen (OCR)… ${p}%`));
+    return { text: r.text, method: 'ocr', confidence: r.confidence, signatures: inspectSignatures(canvas, r.words, 250) };
   }
   if (ext === 'docx') return { text: await docxText(blob), method: 'word', confidence: null };
   if (ext === 'xlsx') return { text: await xlsxText(blob), method: 'excel', confidence: null };

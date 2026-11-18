@@ -41,7 +41,7 @@ function reportText(res, req, auto, top) {
     res.corresponde_al_requisito === false ? '**El documento NO corresponde al requisito.**' : '',
     '\n' + res.resumen,
     list('Hallazgos', res.hallazgos), list('Faltantes', res.faltantes), list('Recomendaciones', res.recomendaciones),
-    `\nConcepto automático por reglas (lectura: ${res.lectura}). Confirma con criterio profesional; no verifico firmas manuscritas ni la veracidad del contenido.`
+    `\nConcepto automático por reglas (lectura: ${res.lectura}). Confirma con criterio profesional; mido si los espacios de firma están vacíos o con trazo, pero no valido que la firma sea auténtica ni la veracidad del contenido.`
   ].filter((x) => x !== '').join('\n');
 }
 
@@ -65,14 +65,14 @@ export default function Auditor() {
 
   async function answerFile(attached, userText) {
     if (!canAnalyze(attached.name, attached.type)) throw new Error('Adjunta PDF, imagen, Word (.docx), Excel (.xlsx) o texto.');
-    const { text: doc, method, confidence } = await extractText(attached, attached.name, attached.type, setBusy);
+    const { text: doc, method, confidence, signatures } = await extractText(attached, attached.name, attached.type, setBusy);
     setBusy('Comparando con los requisitos…');
     const code = (userText.match(/\b[A-Za-z]{2,4}-\d{2}\b/) || [])[0]?.toUpperCase();
     let req = requirements.find((r) => r.id === reqId) || (code && requirements.find((r) => r.code === code));
     let top = null; const auto = !req;
     if (auto) { top = bestRequirements(doc, requirements, 3); req = top[0]?.req; }
     if (!req) throw new Error('Primero carga la plantilla normativa desde el Dashboard.');
-    const res = analyze({ text: doc, req, ocrConfidence: method === 'ocr' ? confidence : null });
+    const res = analyze({ text: doc, req, ocrConfidence: method === 'ocr' ? confidence : null, signatures });
     res.lectura = LECTURA[method];
     if (auto && !res.corresponde_al_requisito) {
       return 'No pude relacionar el documento con ningún requisito con suficiente seguridad.\n' + list('Lo más cercano', top.map((x) => `${x.req.code} · ${x.req.title}`)) + '\n\nElige el requisito en la lista de abajo o escribe su código junto con el archivo.';

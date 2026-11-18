@@ -130,21 +130,84 @@ function detectFormat(rawNorm, dt) {
 }
 
 const SIGN_NEEDED = /firm|acta|listado|asistencia|aprob|adopci|designaci|compromiso|consentimiento|declaraci/;
-const SIGN_FOUND = /firmad|firma electronic|firma digital|signature|elaboro|reviso|aprobo|representante legal|gerente|director/;
 const EXPIRY_NEEDED = /vigen|vencim|poliza|licencia|certificad|habilitaci|rut|camara de comercio|contrato|calibraci|mantenimiento|registro sanitario|vacun/;
 const EXPIRY_KEYS = /(vence|vencimiento|vigencia hasta|valid[oa] hasta|vigente hasta|hasta el|expira|finaliza|fecha de vencimiento)/;
+const LABELS_STOP = /(nombre|fecha|cargo|firma|cedula|documento|c\.c)\s*:/;
+
+// ---------------------------- firmas ----------------------------
+// Valor escrito después de una etiqueta ("Nombre: Juan Pérez") hasta la siguiente etiqueta o el fin de línea
+function valueAfter(t, endIdx) {
+  const rest = t.slice(endIdx).split('\n')[0];
+  const stop = rest.search(LABELS_STOP);
+  const v = (stop >= 0 ? rest.slice(0, stop) : rest).replace(/[_.\-–—|]+/g, ' ').trim();
+  return (v.match(/[a-zñ]/g) || []).length >= 3 ? v : '';
+}
+
+/** Espacios de firma que trae el propio documento y si tienen nombre escrito (texto) */
+function textSignatures(rawNorm) {
+  const blocks = [], firmas = [];
+  for (const m of rawNorm.matchAll(/(?<![a-z])nombre\s*:/g)) {
+    if (!/fecha\s*:/.test(rawNorm.slice(m.index, m.index + 160))) continue; // bloque de firma: Nombre / Fecha
+    blocks.push(valueAfter(rawNorm, m.index + m[0].length));
+  }
+  for (const m of rawNorm.matchAll(/(?<![a-z])firma(?:s)?(?:\s+(?:del?|de la|y sello|responsable)\s+[a-z]+)?\s*:/g)) firmas.push(valueAfter(rawNorm, m.index + m[0].length));
+  const hasColumn = /(^|\n|\s)firma(s)?(\s|$)/.test(rawNorm.replace(/firma(s)?\s*:/g, ''));
+  return { blocks, firmas, hasColumn };
+}
+
+// ---------------------------- campos del formato ----------------------------
+function fieldFill(text, fmt) {
+  const t = norm(text);
+  const labels = [...new Set((fmt.sections || []).filter((x) => x.type === 'info').flatMap((x) => x.fields || []))];
+  const found = []; let from = 0;
+  for (const lab of labels) {
+    const l = norm(lab); const i = t.indexOf(l, from);
+    if (i < 0) continue;
+    found.push({ lab, i, end: i + l.length }); from = i + l.length;
+  }
+  if (labels.length < 2 || found.length < Math.ceil(labels.length * 0.6)) return null; // lectura insuficiente: no se juzga
+  const empty = [];
+  found.forEach((f, k) => {
+    const nextStart = k + 1 < found.length ? found[k + 1].i : t.length;
+    const lineEnd = t.indexOf('\n', f.end); const stop = Math.min(nextStart, lineEnd < 0 ? t.length : lineEnd);
+    const v = t.slice(f.end, stop).replace(/[_.\-–—|:\s]+/g, ' ').trim();
+    if (!/[a-z0-9ñ]/.test(v)) empty.push(f.lab);
+  });
+  return { total: found.length, empty };
+}
+
+// ---------------------------- evidencia esperada ----------------------------
+// Cada elemento de la "evidencia esperada" del requisito (separados por ;) debe aparecer en el documento
+function evidenceItems(req, dt) {
+  const segs = String(req.evidence || '').split(/;|\n/).map((x) => x.trim().replace(/\.$/, '')).filter((x) => x.length > 6);
+  return segs.map((seg) => {
+    const alts = seg.split(/\s+o\s+|\s+y\/o\s+/).filter((x) => terms(x).size);
+    const ratio = Math.max(0, ...alts.map((a) => cover(terms(a), dt.set).ratio));
+    return { seg, ratio };
+  });
+}
+
+// Citas normativas del requisito ("Res. 3100/2019", "Decreto 780") y cuáles aparecen en el documento
+function normCites(req, rawNorm) {
+  const cites = [];
+  for (const m of norm(req.norma).matchAll(/(decreto|resolucion|res\.?|ley|circular(?: externa)?|cir\.?)\s*(?:no\.?\s*)?(\d{1,4})(?:\s*(?:de|\/)\s*(\d{4}))?/g)) cites.push({ label: `${m[1].replace(/\.$/, '')} ${m[2]}${m[3] ? '/' + m[3] : ''}`, num: m[2] });
+  const all = [...new Map(cites.map((c) => [c.num, c])).values()];
+  const cited = all.filter((c) => new RegExp(`(?<!\\d)${c.num}(?!\\d)`).test(rawNorm));
+  return { all, cited };
+}
 
 /**
  * Analiza el texto extraído de un documento frente a un requisito.
- * Devuelve el mismo formato que usa la interfaz: veredicto, puntaje, hallazgos, faltantes…
+ * signatures: espacios de firma medidos visualmente [{ kind, ink: true|false|null }] (si se pudo).
  */
-export function analyze({ text, req, ocrConfidence = null, today = new Date() }) {
+export function analyze({ text, req, ocrConfidence = null, signatures = null, today = new Date() }) {
   text = String(text || '').replace(/sistema obligatorio de garant[ií]a de calidad en salud/gi, ' ').replace(/formato sugerido generado con la app urueta pamec[^.]*\./gi, ' ');
   const hallazgos = [], faltantes = [], recomendaciones = [];
   const rawNorm = norm(text); const dt = docTokens(text);
   const rel = relevance(dt, rawNorm, req);
   const detected = detectFormat(rawNorm, dt);
   const detectedName = detected ? `${detected.f.title} (${detected.f.id})` : null;
+  const blockers = []; // fallas que impiden aprobar
 
   // ---------- legibilidad ----------
   if (dt.count < 25) {
@@ -158,43 +221,71 @@ export function analyze({ text, req, ocrConfidence = null, today = new Date() })
   if (ocrConfidence != null && ocrConfidence < 60) {
     faltantes.push(`Baja legibilidad de la imagen (reconocimiento ${Math.round(ocrConfidence)}%). El análisis puede fallar.`);
     recomendaciones.push('Tome la foto de nuevo con más luz y encuadre completo, o suba el PDF.');
+    blockers.push('legibilidad');
   }
 
-  // ---------- pertinencia ----------
+  // ---------- pertinencia (35) ----------
   const corresponde = rel.score >= 0.45 && (rel.cTitle.ratio >= 0.3 || !!(rel.fmtById || rel.codeHit));
-  const pertPts = Math.round(Math.min(1, rel.score / 0.8) * 50);
+  const pertPts = Math.round(Math.min(1, rel.score / 0.8) * 35);
   if (rel.fmtById) hallazgos.push(`Corresponde al formato ${rel.fmtById.id} «${rel.fmtById.title}», que soporta este requisito.`);
   else if (rel.codeHit) hallazgos.push(`El documento cita el código del requisito (${req.code}).`);
   else if (detected && !rel.fmts.some((f) => f.id === detected.f.id)) hallazgos.push(`Parece ser el formato ${detected.f.id} «${detected.f.title}», que no está asociado a este requisito.`);
   hallazgos.push(`Términos del título encontrados: ${rel.cTitle.found.length} de ${rel.cTitle.found.length + rel.cTitle.missing.length}${rel.cTitle.found.length ? ' (' + rel.cTitle.found.slice(0, 6).join(', ') + ')' : ''}.`);
-  if (rel.cEvid.found.length + rel.cEvid.missing.length) hallazgos.push(`Elementos de la evidencia esperada encontrados: ${rel.cEvid.found.length} de ${rel.cEvid.found.length + rel.cEvid.missing.length}.`);
   if (rel.cTitle.missing.length) faltantes.push('No se encontraron los términos del requisito: ' + rel.cTitle.missing.slice(0, 8).join(', ') + '.');
-  if (rel.cEvid.ratio < 0.5 && rel.cEvid.missing.length) faltantes.push('Parte de la evidencia esperada no aparece: ' + rel.cEvid.missing.slice(0, 8).join(', ') + '.');
-  if (!corresponde) faltantes.unshift('El contenido no coincide con lo que pide este requisito.');
+  if (!corresponde) { faltantes.unshift('El contenido no coincide con lo que pide este requisito.'); blockers.push('pertinencia'); }
   if (!rel.fmtById && rel.fmts.length) recomendaciones.push(`Use el formato ${rel.fmts.map((f) => f.id).join(' o ')} de la pestaña Formatos.`);
 
-  // ---------- completitud ----------
-  let compPts;
+  // ---------- contenido frente a la evidencia que pide el requisito y la norma (25) ----------
   const own = rel.fmtById || (detected?.how === 'código' ? detected.f : null);
-  if (own) {
-    const tpl = formatTokenSet(own);
-    let extra = 0; for (const w of norm(text).split(/[^a-z0-9ñ]+/)) if (w.length >= 3 && !tpl.has(stem(w))) extra++;
-    compPts = Math.round(Math.min(1, extra / 60) * 20);
-    if (extra < 12) { faltantes.push('El formato parece estar en blanco o casi sin diligenciar.'); recomendaciones.push('Diligencie los campos del formato antes de subirlo como evidencia.'); }
-    else hallazgos.push(`El formato contiene información diligenciada (${extra} palabras propias).`);
-  } else {
-    compPts = Math.round(Math.min(1, dt.count / 150) * 20);
-    if (dt.count < 60) faltantes.push('El documento tiene muy poco contenido.');
+  const parts = [];
+  const items = evidenceItems(req, dt);
+  if (items.length) {
+    const okItems = items.filter((x) => x.ratio >= 0.5);
+    parts.push(okItems.length / items.length);
+    hallazgos.push(`Elementos de la evidencia que pide el requisito: ${okItems.length} de ${items.length}.`);
+    items.filter((x) => x.ratio < 0.5).forEach((x) => faltantes.push(`No se evidencia: «${x.seg}».`));
+    if (okItems.length < items.length) blockers.push('evidencia');
+  } else if (rel.cEvid.found.length + rel.cEvid.missing.length) {
+    parts.push(rel.cEvid.ratio);
+    hallazgos.push(`Elementos de la evidencia esperada encontrados: ${rel.cEvid.found.length} de ${rel.cEvid.found.length + rel.cEvid.missing.length}.`);
+    if (rel.cEvid.ratio < 0.5) { faltantes.push('Parte de la evidencia esperada no aparece: ' + rel.cEvid.missing.slice(0, 8).join(', ') + '.'); blockers.push('evidencia'); }
   }
+  if (own) {
+    const ff = fieldFill(text, own);
+    if (ff) {
+      parts.push((ff.total - ff.empty.length) / ff.total);
+      if (ff.empty.length) {
+        faltantes.push(`Campos del formato sin diligenciar (${ff.empty.length} de ${ff.total}): ${ff.empty.slice(0, 8).join(', ')}${ff.empty.length > 8 ? '…' : ''}.`);
+        recomendaciones.push('Diligencie todos los campos del formato antes de subirlo como evidencia.');
+        blockers.push('campos');
+      } else hallazgos.push(`Todos los campos del formato están diligenciados (${ff.total}).`);
+      if (ff.empty.length > ff.total / 2) blockers.push('en blanco');
+    } else {
+      const tpl = formatTokenSet(own);
+      let extra = 0; for (const w of rawNorm.split(/[^a-z0-9ñ]+/)) if (w.length >= 3 && !tpl.has(stem(w))) extra++;
+      parts.push(Math.min(1, extra / 60));
+      if (extra < 12) { faltantes.push('El formato parece estar en blanco o casi sin diligenciar.'); recomendaciones.push('Diligencie los campos del formato antes de subirlo como evidencia.'); blockers.push('en blanco'); }
+      else hallazgos.push(`El formato contiene información diligenciada (${extra} palabras propias).`);
+    }
+  } else {
+    parts.push(Math.min(1, dt.count / 150));
+    if (dt.count < 60) { faltantes.push('El documento tiene muy poco contenido.'); blockers.push('contenido'); }
+  }
+  const cites = normCites(req, rawNorm);
+  if (cites.all.length) {
+    if (cites.cited.length) hallazgos.push('Cita la norma que sustenta el requisito: ' + cites.cited.map((c) => c.label).join(', ') + '.');
+    else if (!own) recomendaciones.push('El documento no cita la norma en que se basa (' + cites.all.map((c) => c.label).join(', ') + '). Conviene referenciarla.');
+  }
+  const contPts = Math.round((parts.reduce((a, b) => a + b, 0) / Math.max(1, parts.length)) * 25);
 
-  // ---------- fechas y vigencia ----------
+  // ---------- fechas (10) y vigencia (10) ----------
   const { t: dtext, list: dates } = findDates(text);
   const todayUTC = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
   let datePts = 0, vigPts = 10, expiry = null;
   if (dates.length) {
     datePts = 10;
     hallazgos.push('Fechas detectadas: ' + [...new Set(dates.map((d) => fmt(d.date)))].slice(0, 5).join(', ') + '.');
-  } else faltantes.push('No se detectó ninguna fecha en el documento.');
+  } else { faltantes.push('No se detectó ninguna fecha diligenciada en el documento.'); blockers.push('fecha'); }
 
   const expKey = [...dtext.matchAll(new RegExp(EXPIRY_KEYS, 'g'))];
   for (const k of expKey) { const hit = dates.find((d) => d.idx >= k.index && d.idx - (k.index + k[0].length) <= 40); if (hit) { expiry = hit.date; break; } }
@@ -206,40 +297,65 @@ export function analyze({ text, req, ocrConfidence = null, today = new Date() })
     else if (days <= 60) { vigPts = 6; hallazgos.push(`Vigente hasta el ${fmt(expiry)}.`); recomendaciones.push(`Vence en ${days} días: programe la renovación.`); }
     else { hallazgos.push(`Vigente hasta el ${fmt(expiry)}.`); }
   } else if (needsExpiry) {
-    vigPts = 3; faltantes.push('No se detectó fecha de vencimiento o vigencia.');
+    vigPts = 3; faltantes.push('No se detectó fecha de vencimiento o vigencia.'); blockers.push('vigencia');
   } else if (dates.length && /anual|semestral|trimestral|mensual/i.test(req.periodicity || '')) {
     const newest = dates[dates.length - 1].date; const age = Math.round((todayUTC - newest) / 86400000);
-    if (age > 400 && /anual/i.test(req.periodicity)) { vigPts = 4; faltantes.push(`La fecha más reciente (${fmt(newest)}) tiene más de un año; el requisito es anual.`); }
+    if (age > 400 && /anual/i.test(req.periodicity)) { vigPts = 4; faltantes.push(`La fecha más reciente (${fmt(newest)}) tiene más de un año; el requisito es anual.`); blockers.push('vigencia'); }
   }
 
-  // ---------- firmas ----------
-  let signPts = 10;
-  if (SIGN_NEEDED.test(norm(req.title + ' ' + req.evidence))) {
-    if (SIGN_FOUND.test(rawNorm)) hallazgos.push('Contiene campos o menciones de firma/responsable (confirme visualmente que estén firmados).');
-    else { signPts = 3; faltantes.push('No se detecta firma ni responsable (el requisito pide soporte firmado).'); }
+  // ---------- firmas (20) ----------
+  // Se toman los espacios de firma que trae el propio documento; si el requisito exige soporte firmado, también debe haberlos.
+  const ts = textSignatures(rawNorm);
+  const typedSlots = [...ts.blocks, ...ts.firmas];
+  const typedNames = typedSlots.filter(Boolean).length;
+  const visual = (signatures || []).filter((x) => x.ink !== null);
+  const visualInk = visual.filter((x) => x.ink).length;
+  const required = SIGN_NEEDED.test(norm(req.title + ' ' + req.evidence)) || /firmad|firma del|firma de /.test(norm(req.evidence));
+  const nSlots = Math.max(typedSlots.length, visual.length, ts.hasColumn ? 1 : 0);
+  let signPts = 20;
+  if (nSlots > 0) {
+    if (visual.length) {
+      if (visualInk === 0 && typedNames === 0) { signPts = 0; faltantes.push(`El documento tiene ${nSlots} espacio(s) de firma y NINGUNO está firmado (no se detecta trazo ni nombre).`); blockers.push('sin firmas'); }
+      else if (visualInk === 0) { signPts = 6; faltantes.push('Hay nombres escritos pero no se detecta trazo de firma en los espacios de firma.'); recomendaciones.push('Firme el documento (firma manuscrita o electrónica) y vuelva a subirlo.'); blockers.push('sin firmas'); }
+      else if (visualInk < visual.length) { signPts = Math.round(20 * visualInk / visual.length); faltantes.push(`Firmas detectadas en ${visualInk} de ${visual.length} espacios de firma; faltan ${visual.length - visualInk}.`); blockers.push('firmas incompletas'); }
+      else hallazgos.push(`Se detectó trazo de firma en ${visualInk} de ${visual.length} espacio(s) de firma.`);
+    } else if (typedSlots.length) {
+      if (typedNames === 0) { signPts = 0; faltantes.push(`El documento tiene ${typedSlots.length} espacio(s) de firma y NINGUNO está diligenciado (sin nombre ni firma).`); blockers.push('sin firmas'); }
+      else if (typedNames < typedSlots.length) { signPts = Math.round(20 * typedNames / typedSlots.length); faltantes.push(`Firmas/nombres en ${typedNames} de ${typedSlots.length} espacios de firma.`); blockers.push('firmas incompletas'); }
+      else hallazgos.push(`Los ${typedSlots.length} espacio(s) de firma tienen nombre o firma escrita.`);
+      if (ocrConfidence != null || own) { recomendaciones.push('Este auditor no pudo medir el trazo de la firma en este archivo: confírmela a simple vista.'); blockers.push('firma por confirmar'); }
+    } else {
+      signPts = 8; faltantes.push('Se ve una columna o campo «Firma» pero no se pudo verificar que esté firmado.'); recomendaciones.push('Confirme a simple vista que las firmas estén puestas.'); blockers.push('firma por confirmar');
+    }
+  } else if (required) {
+    signPts = 0; faltantes.push('El requisito pide un soporte firmado y el documento no muestra espacios ni constancia de firma (firma, nombre o responsable que aprueba).');
+    recomendaciones.push('Suba el documento firmado por el responsable o el representante legal.'); blockers.push('sin firmas');
+  } else if (/firm|elaboro|aprobo|reviso/.test(rawNorm)) {
+    hallazgos.push('El documento menciona responsables de elaboración/aprobación.');
   }
-  if (ocrConfidence != null || own) recomendaciones.push('Este auditor no puede verificar firmas manuscritas: confírmelas a simple vista.');
+  recomendaciones.push('El auditor mide si los espacios de firma están vacíos o con trazo, pero no puede validar que la firma sea auténtica ni de quién es.');
 
-  return finish();
+  const puntaje = Math.max(0, Math.min(100, pertPts + contPts + datePts + signPts + vigPts));
+  let veredicto = 'observaciones';
+  const hard = !corresponde || vencido || puntaje < 40 || blockers.includes('sin firmas') || blockers.includes('en blanco');
+  if (hard) veredicto = 'rechazado';
+  else if (!blockers.length && !faltantes.length && puntaje >= 80) veredicto = 'aprobado';
+  const puntajeFinal = veredicto === 'aprobado' ? puntaje : Math.min(puntaje, veredicto === 'rechazado' ? 45 : 79);
 
-  function finish() {
-    const puntaje = Math.max(0, Math.min(100, pertPts + compPts + datePts + signPts + vigPts));
-    let veredicto = 'observaciones';
-    if (!corresponde || vencido || puntaje < 35) veredicto = 'rechazado';
-    else if (puntaje >= 75 && !faltantes.length) veredicto = 'aprobado';
-    else if (puntaje >= 85 && faltantes.every((f) => /firma|BAJA|manuscrit/i.test(f))) veredicto = 'aprobado';
-
-    const resumen = veredicto === 'aprobado'
-      ? 'El documento corresponde al requisito y cumple las verificaciones objetivas (contenido, fechas, vigencia).'
-      : veredicto === 'rechazado'
-        ? (!corresponde ? 'El documento no parece corresponder a lo que pide este requisito.' : vencido ? 'El documento corresponde al requisito pero está vencido.' : 'El documento tiene demasiadas fallas para aceptarse como evidencia.')
-        : 'El documento parece corresponder al requisito, pero tiene puntos por completar o confirmar.';
-    return {
-      motor: 'local', veredicto, puntaje, tipo_documento_detectado: detectedName || 'Documento sin clasificar',
-      corresponde_al_requisito: corresponde, resumen, hallazgos, faltantes,
-      recomendaciones: [...new Set(recomendaciones)], fecha_vigencia_detectada: expiry ? iso(expiry) : null
-    };
-  }
+  const resumen = veredicto === 'aprobado'
+    ? 'El documento corresponde al requisito, está diligenciado, firmado y vigente según las verificaciones objetivas.'
+    : veredicto === 'rechazado'
+      ? (!corresponde ? 'El documento no parece corresponder a lo que pide este requisito.'
+        : vencido ? 'El documento corresponde al requisito pero está vencido.'
+          : blockers.includes('sin firmas') ? 'El documento no está firmado: no sirve como evidencia hasta que se firme.'
+            : blockers.includes('en blanco') ? 'El formato está en blanco o casi sin diligenciar.'
+              : 'El documento tiene demasiadas fallas para aceptarse como evidencia.')
+      : 'El documento parece corresponder al requisito, pero tiene puntos por completar o confirmar antes de darlo por cumplido.';
+  return {
+    motor: 'local', veredicto, puntaje: puntajeFinal, tipo_documento_detectado: detectedName || 'Documento sin clasificar',
+    corresponde_al_requisito: corresponde, resumen, hallazgos, faltantes,
+    recomendaciones: [...new Set(recomendaciones)], fecha_vigencia_detectada: expiry ? iso(expiry) : null
+  };
 }
 
 // ---------------------------- asistente de consulta ----------------------------

@@ -82,8 +82,8 @@ export default function Evidence({ target, link, onReviewed }) {
   }
 
   async function reviewLocal(doc, blob, mime) {
-    const { text, method, confidence } = await extractText(blob, doc.file_name, mime, setBusy);
-    const res = analyze({ text, req: target, ocrConfidence: method === 'ocr' ? confidence : null });
+    const { text, method, confidence, signatures } = await extractText(blob, doc.file_name, mime, setBusy);
+    const res = analyze({ text, req: target, ocrConfidence: method === 'ocr' ? confidence : null, signatures });
     res.lectura = { pdf: 'texto del PDF', ocr: 'reconocimiento de imagen (OCR)', texto: 'texto', word: 'Word', excel: 'Excel' }[method];
     res.motor = 'reglas';
     if (!res.corresponde_al_requisito && key === 'requirement_id') {
@@ -210,7 +210,7 @@ export function AiResult({ res }) {
       <List t="Hallazgos" items={res.hallazgos} />
       <List t="Faltantes" items={res.faltantes} />
       <List t="Recomendaciones" items={res.recomendaciones} />
-      <p className="small muted" style={{ marginTop: 10 }}>{res.motor === 'gemini' ? 'Concepto del agente IA (Gemini).' : 'Concepto automático por reglas' + (res.lectura ? ' (lectura: ' + res.lectura + ')' : '') + '.'} Confirme con criterio profesional; no verifica firmas manuscritas ni la veracidad del contenido.</p>
+      <p className="small muted" style={{ marginTop: 10 }}>{res.motor === 'gemini' ? 'Concepto del agente IA (Gemini).' : 'Concepto automático por reglas' + (res.lectura ? ' (lectura: ' + res.lectura + ')' : '') + '.'} Confirme con criterio profesional; mide si los espacios de firma están vacíos o con trazo, pero no valida que la firma sea auténtica ni la veracidad del contenido.</p>
     </div>
   );
 }
